@@ -48,9 +48,14 @@ interface P2pHostState {
 }
 
 const PEER_PREFIX = 'igcse0580-stats-';
+const BC_PREFIX = 'igcse0580-bc-';
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
 ];
 
 const API_BASE = (() => {
@@ -79,13 +84,23 @@ function getOrCreateClientId(): string {
   }
 }
 
+/**
+ * Extracts a clean alphanumeric group code from either a raw code ("K7M9P2", "k7m-9p2")
+ * or a pasted invite link ("https://app.vercel.app/?code=K7M9P2").
+ */
 export function normalizeCodeInput(raw: string): string {
-  return raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+  const trimmed = raw.trim();
+  const urlCodeMatch = trimmed.match(/[?&#]code=([a-zA-Z0-9_-]+)/i);
+  const target = urlCodeMatch ? urlCodeMatch[1] : trimmed;
+  return target.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
 }
 
 function saveP2pHostSnapshot(
   code: string,
-  state: Pick<P2pHostState, 'roomCode' | 'version' | 'updatedAt' | 'lastEditedBy' | 'project'>
+  state: Pick<
+    P2pHostState,
+    'roomCode' | 'version' | 'updatedAt' | 'lastEditedBy' | 'project'
+  >
 ) {
   try {
     window.localStorage.setItem(
@@ -99,7 +114,10 @@ function saveP2pHostSnapshot(
 
 function loadP2pHostSnapshot(
   code: string
-): Pick<P2pHostState, 'roomCode' | 'version' | 'updatedAt' | 'lastEditedBy' | 'project'> | null {
+): Pick<
+  P2pHostState,
+  'roomCode' | 'version' | 'updatedAt' | 'lastEditedBy' | 'project'
+> | null {
   try {
     const raw = window.localStorage.getItem(`igcse_stats_p2p_room_${code}`);
     if (!raw) return null;
@@ -118,7 +136,7 @@ function loadP2pHostSnapshot(
 
 async function checkServerBackendAvailable(): Promise<boolean> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1800);
+  const timer = setTimeout(() => controller.abort(), 3500);
   try {
     const res = await fetch(`${API_BASE}/api/health`, {
       method: 'GET',
@@ -137,6 +155,33 @@ async function checkServerBackendAvailable(): Promise<boolean> {
   }
 }
 
+function sendWhenConnReady(conn: DataConnection, payload: unknown): void {
+  if (conn.open) {
+    try {
+      conn.send(payload);
+    } catch {
+      // Ignore send errors
+    }
+    return;
+  }
+  conn.once('open', () => {
+    try {
+      conn.send(payload);
+    } catch {
+      // Ignore send errors
+    }
+  });
+}
+
+function createBroadcastChannel(code: string): BroadcastChannel | null {
+  try {
+    if (typeof BroadcastChannel === 'undefined') return null;
+    return new BroadcastChannel(`${BC_PREFIX}${code}`);
+  } catch {
+    return null;
+  }
+}
+
 export function useGroupSession({
   activeStage,
   onFullSync,
@@ -147,14 +192,17 @@ export function useGroupSession({
   const wsRef = useRef<WebSocket | null>(null);
   const peerRef = useRef<Peer | null>(null);
   const guestConnRef = useRef<DataConnection | null>(null);
+  const bcRef = useRef<BroadcastChannel | null>(null);
+  const bcGuestActiveRef = useRef<boolean>(false);
   const p2pHostRef = useRef<P2pHostState | null>(null);
 
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hostWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectAttemptRef = useRef<number>(0);
   const pendingPatchesRef = useRef<GroupProjectPatch[]>([]);
   const shouldStayConnectedRef = useRef<boolean>(false);
-  const backendAvailableRef = useRef<boolean | null>(null);
+  const backendConfirmedRef = useRef<boolean>(false);
 
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [status, setStatus] = useState<SessionConnectionStatus>('idle');
@@ -226,6 +274,10 @@ export function useGroupSession({
       clearInterval(pingTimerRef.current);
       pingTimerRef.current = null;
     }
+    if (hostWatchdogRef.current) {
+      clearInterval(hostWatchdogRef.current);
+      hostWatchdogRef.current = null;
+    }
     if (wsRef.current) {
       try {
         wsRef.current.onopen = null;
@@ -264,10 +316,19 @@ export function useGroupSession({
       }
       peerRef.current = null;
     }
+    if (bcRef.current) {
+      try {
+        bcRef.current.close();
+      } catch {
+        // Ignore
+      }
+      bcRef.current = null;
+    }
+    bcGuestActiveRef.current = false;
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Server WebSocket Connection (used when Express backend is running)
+  // Server WebSocket Connection (when Express backend is running)
   // ---------------------------------------------------------------------------
   const connectServerSocket = useCallback(
     (code: string) => {
@@ -354,7 +415,8 @@ export function useGroupSession({
 
         if (msg.type === 'project:patched') {
           const originClientId = String(msg.originClientId ?? '');
-          const nextEdited = (msg.lastEditedBy as GroupRoomState['lastEditedBy']) ?? null;
+          const nextEdited =
+            (msg.lastEditedBy as GroupRoomState['lastEditedBy']) ?? null;
           setLastEditedBy(nextEdited);
           if (originClientId === clientIdRef.current) return;
           const patch = msg.patch as GroupProjectPatch;
@@ -395,7 +457,7 @@ export function useGroupSession({
   );
 
   // ---------------------------------------------------------------------------
-  // P2P WebRTC Host Room (serverless fallback for Vercel / static hosting)
+  // P2P WebRTC + BroadcastChannel Host Room (serverless Vercel / static support)
   // ---------------------------------------------------------------------------
   const startP2pHost = useCallback(
     async (
@@ -468,17 +530,23 @@ export function useGroupSession({
               };
               p2pHostRef.current = hostState;
 
-              const broadcastP2p = (
+              const bc = createBroadcastChannel(candidateCode);
+              bcRef.current = bc;
+
+              const broadcastAll = (
                 payload: unknown,
                 excludeConn?: DataConnection
               ) => {
                 for (const c of hostState.connections) {
-                  if (c !== excludeConn && c.open) {
-                    try {
-                      c.send(payload);
-                    } catch {
-                      // Ignore individual connection send error
-                    }
+                  if (c !== excludeConn) {
+                    sendWhenConnReady(c, payload);
+                  }
+                }
+                if (bc) {
+                  try {
+                    bc.postMessage(payload);
+                  } catch {
+                    // Ignore BroadcastChannel send errors
                   }
                 }
               };
@@ -491,6 +559,244 @@ export function useGroupSession({
                 project: hostState.project,
                 participants: Array.from(hostState.participants.values()),
               });
+
+              const handleGuestMessage = (
+                msg: Record<string, unknown>,
+                replyConn?: DataConnection
+              ) => {
+                const type = msg.type;
+
+                if (type === 'bc:discover') {
+                  if (bc) {
+                    try {
+                      bc.postMessage({
+                        type: 'bc:here',
+                        roomCode: candidateCode,
+                        targetClientId: msg.clientId,
+                      });
+                    } catch {
+                      // Ignore
+                    }
+                  }
+                  return;
+                }
+
+                if (type === 'ping') {
+                  if (replyConn) sendWhenConnReady(replyConn, { type: 'pong' });
+                  return;
+                }
+
+                if (type === 'room:join') {
+                  const guestId =
+                    String(msg.clientId ?? '').slice(0, 64) ||
+                    replyConn?.peer ||
+                    `guest-${Date.now()}`;
+                  const guestName =
+                    String(msg.userName ?? 'Teammate').trim().slice(0, 60) ||
+                    'Teammate';
+                  const guestRole =
+                    String(msg.role ?? 'Collaborator').trim().slice(0, 60) ||
+                    'Collaborator';
+                  const guestStage = (['data', 'table', 'histogram'].includes(
+                    String(msg.activeStage)
+                  )
+                    ? String(msg.activeStage)
+                    : 'data') as LabStage;
+
+                  if (replyConn) {
+                    hostState.connToClientId.set(replyConn, guestId);
+                  }
+                  hostState.participants.set(guestId, {
+                    clientId: guestId,
+                    userName: guestName,
+                    role: guestRole,
+                    activeStage: guestStage,
+                    joinedAt: Date.now(),
+                  });
+
+                  const nextProject = ensureMemberInRoster(
+                    hostState.project,
+                    guestName,
+                    guestRole
+                  );
+                  if (nextProject !== hostState.project) {
+                    hostState.project = nextProject;
+                    hostState.version += 1;
+                    hostState.updatedAt = Date.now();
+                    saveP2pHostSnapshot(candidateCode, {
+                      roomCode: candidateCode,
+                      version: hostState.version,
+                      updatedAt: hostState.updatedAt,
+                      lastEditedBy: hostState.lastEditedBy,
+                      project: hostState.project,
+                    });
+                  }
+
+                  const snapshot = getHostSnapshot();
+                  if (replyConn) {
+                    sendWhenConnReady(replyConn, { type: 'room:sync', room: snapshot });
+                  } else if (bc) {
+                    try {
+                      bc.postMessage({
+                        type: 'room:sync',
+                        room: snapshot,
+                        targetClientId: guestId,
+                      });
+                    } catch {
+                      // Ignore
+                    }
+                  }
+
+                  setParticipants(snapshot.participants);
+                  callbacksRef.current.onPresenceUpdated(
+                    snapshot.participants,
+                    hostState.project.members
+                  );
+                  broadcastAll(
+                    {
+                      type: 'presence:updated',
+                      participants: snapshot.participants,
+                      members: hostState.project.members,
+                    },
+                    replyConn
+                  );
+                  return;
+                }
+
+                if (type === 'presence:stage') {
+                  const guestId =
+                    (replyConn && hostState.connToClientId.get(replyConn)) ||
+                    String(msg.clientId ?? '');
+                  if (!guestId) return;
+                  const existing = hostState.participants.get(guestId);
+                  if (!existing) return;
+
+                  const nextStage = (['data', 'table', 'histogram'].includes(
+                    String(msg.activeStage)
+                  )
+                    ? String(msg.activeStage)
+                    : existing.activeStage) as LabStage;
+                  const nextName =
+                    typeof msg.userName === 'string' && msg.userName.trim()
+                      ? msg.userName.trim().slice(0, 60)
+                      : existing.userName;
+                  const nextRole =
+                    typeof msg.role === 'string' && msg.role.trim()
+                      ? msg.role.trim().slice(0, 60)
+                      : existing.role;
+
+                  hostState.participants.set(guestId, {
+                    ...existing,
+                    userName: nextName,
+                    role: nextRole,
+                    activeStage: nextStage,
+                  });
+                  const nextProject = ensureMemberInRoster(
+                    hostState.project,
+                    nextName,
+                    nextRole
+                  );
+                  if (nextProject !== hostState.project) {
+                    hostState.project = nextProject;
+                  }
+                  const nextParticipants = Array.from(
+                    hostState.participants.values()
+                  );
+                  setParticipants(nextParticipants);
+                  callbacksRef.current.onPresenceUpdated(
+                    nextParticipants,
+                    hostState.project.members
+                  );
+                  broadcastAll({
+                    type: 'presence:updated',
+                    participants: nextParticipants,
+                    members: hostState.project.members,
+                  });
+                  return;
+                }
+
+                if (type === 'project:patch') {
+                  const patch = msg.patch as GroupProjectPatch | undefined;
+                  if (!patch || typeof patch !== 'object') return;
+                  const guestId =
+                    (replyConn && hostState.connToClientId.get(replyConn)) ||
+                    String(msg.clientId ?? '');
+                  const editorName =
+                    typeof msg.userName === 'string' && msg.userName.trim()
+                      ? msg.userName.trim().slice(0, 60)
+                      : 'Teammate';
+
+                  hostState.project = applyProjectPatch(hostState.project, patch);
+                  hostState.version += 1;
+                  hostState.updatedAt = Date.now();
+                  hostState.lastEditedBy = {
+                    userName: editorName,
+                    section: describePatchSection(patch),
+                    timestamp: hostState.updatedAt,
+                  };
+
+                  saveP2pHostSnapshot(candidateCode, {
+                    roomCode: candidateCode,
+                    version: hostState.version,
+                    updatedAt: hostState.updatedAt,
+                    lastEditedBy: hostState.lastEditedBy,
+                    project: hostState.project,
+                  });
+
+                  setLastEditedBy(hostState.lastEditedBy);
+                  callbacksRef.current.onRemotePatch(
+                    patch,
+                    hostState.lastEditedBy
+                  );
+
+                  broadcastAll(
+                    {
+                      type: 'project:patched',
+                      patch,
+                      version: hostState.version,
+                      updatedAt: hostState.updatedAt,
+                      lastEditedBy: hostState.lastEditedBy,
+                      originClientId: guestId,
+                    },
+                    replyConn
+                  );
+                  return;
+                }
+
+                if (type === 'room:leave') {
+                  const guestId =
+                    (replyConn && hostState.connToClientId.get(replyConn)) ||
+                    String(msg.clientId ?? '');
+                  if (guestId && hostState.participants.has(guestId)) {
+                    hostState.participants.delete(guestId);
+                    const nextParticipants = Array.from(
+                      hostState.participants.values()
+                    );
+                    setParticipants(nextParticipants);
+                    callbacksRef.current.onPresenceUpdated(
+                      nextParticipants,
+                      hostState.project.members
+                    );
+                    broadcastAll({
+                      type: 'presence:updated',
+                      participants: nextParticipants,
+                      members: hostState.project.members,
+                    });
+                  }
+                }
+              };
+
+              if (bc) {
+                bc.onmessage = (ev) => {
+                  const data = ev.data;
+                  if (!data || typeof data !== 'object') return;
+                  const msg = data as Record<string, unknown>;
+                  if (String(msg.originClientId ?? '') === clientIdRef.current) {
+                    return;
+                  }
+                  handleGuestMessage(msg);
+                };
+              }
 
               peer.on('connection', (conn) => {
                 hostState.connections.add(conn);
@@ -509,7 +815,7 @@ export function useGroupSession({
                       nextParticipants,
                       hostState.project.members
                     );
-                    broadcastP2p({
+                    broadcastAll({
                       type: 'presence:updated',
                       participants: nextParticipants,
                       members: hostState.project.members,
@@ -519,192 +825,33 @@ export function useGroupSession({
 
                 conn.on('data', (rawData) => {
                   if (!rawData || typeof rawData !== 'object') return;
-                  const msg = rawData as Record<string, unknown>;
-                  const type = msg.type;
-
-                  if (type === 'ping') {
-                    if (conn.open) conn.send({ type: 'pong' });
-                    return;
-                  }
-
-                  if (type === 'room:join') {
-                    const guestId =
-                      String(msg.clientId ?? '').slice(0, 64) || conn.peer;
-                    const guestName =
-                      String(msg.userName ?? 'Teammate').trim().slice(0, 60) ||
-                      'Teammate';
-                    const guestRole =
-                      String(msg.role ?? 'Collaborator').trim().slice(0, 60) ||
-                      'Collaborator';
-                    const guestStage = (['data', 'table', 'histogram'].includes(
-                      String(msg.activeStage)
-                    )
-                      ? String(msg.activeStage)
-                      : 'data') as LabStage;
-
-                    hostState.connToClientId.set(conn, guestId);
-                    hostState.participants.set(guestId, {
-                      clientId: guestId,
-                      userName: guestName,
-                      role: guestRole,
-                      activeStage: guestStage,
-                      joinedAt: Date.now(),
-                    });
-
-                    const nextProject = ensureMemberInRoster(
-                      hostState.project,
-                      guestName,
-                      guestRole
-                    );
-                    if (nextProject !== hostState.project) {
-                      hostState.project = nextProject;
-                      hostState.version += 1;
-                      hostState.updatedAt = Date.now();
-                      saveP2pHostSnapshot(candidateCode, {
-                        roomCode: candidateCode,
-                        version: hostState.version,
-                        updatedAt: hostState.updatedAt,
-                        lastEditedBy: hostState.lastEditedBy,
-                        project: hostState.project,
-                      });
-                    }
-
-                    const snapshot = getHostSnapshot();
-                    if (conn.open) {
-                      conn.send({ type: 'room:sync', room: snapshot });
-                    }
-                    setParticipants(snapshot.participants);
-                    callbacksRef.current.onPresenceUpdated(
-                      snapshot.participants,
-                      hostState.project.members
-                    );
-                    broadcastP2p(
-                      {
-                        type: 'presence:updated',
-                        participants: snapshot.participants,
-                        members: hostState.project.members,
-                      },
-                      conn
-                    );
-                    return;
-                  }
-
-                  if (type === 'presence:stage') {
-                    const guestId = hostState.connToClientId.get(conn);
-                    if (!guestId) return;
-                    const existing = hostState.participants.get(guestId);
-                    if (!existing) return;
-
-                    const nextStage = (['data', 'table', 'histogram'].includes(
-                      String(msg.activeStage)
-                    )
-                      ? String(msg.activeStage)
-                      : existing.activeStage) as LabStage;
-                    const nextName =
-                      typeof msg.userName === 'string' && msg.userName.trim()
-                        ? msg.userName.trim().slice(0, 60)
-                        : existing.userName;
-                    const nextRole =
-                      typeof msg.role === 'string' && msg.role.trim()
-                        ? msg.role.trim().slice(0, 60)
-                        : existing.role;
-
-                    hostState.participants.set(guestId, {
-                      ...existing,
-                      userName: nextName,
-                      role: nextRole,
-                      activeStage: nextStage,
-                    });
-                    const nextProject = ensureMemberInRoster(
-                      hostState.project,
-                      nextName,
-                      nextRole
-                    );
-                    if (nextProject !== hostState.project) {
-                      hostState.project = nextProject;
-                    }
-                    const nextParticipants = Array.from(
-                      hostState.participants.values()
-                    );
-                    setParticipants(nextParticipants);
-                    callbacksRef.current.onPresenceUpdated(
-                      nextParticipants,
-                      hostState.project.members
-                    );
-                    broadcastP2p({
-                      type: 'presence:updated',
-                      participants: nextParticipants,
-                      members: hostState.project.members,
-                    });
-                    return;
-                  }
-
-                  if (type === 'project:patch') {
-                    const patch = msg.patch as GroupProjectPatch | undefined;
-                    if (!patch || typeof patch !== 'object') return;
-                    const guestId =
-                      hostState.connToClientId.get(conn) ??
-                      String(msg.clientId ?? '');
-                    const editorName =
-                      typeof msg.userName === 'string' && msg.userName.trim()
-                        ? msg.userName.trim().slice(0, 60)
-                        : 'Teammate';
-
-                    hostState.project = applyProjectPatch(hostState.project, patch);
-                    hostState.version += 1;
-                    hostState.updatedAt = Date.now();
-                    hostState.lastEditedBy = {
-                      userName: editorName,
-                      section: describePatchSection(patch),
-                      timestamp: hostState.updatedAt,
-                    };
-
-                    saveP2pHostSnapshot(candidateCode, {
-                      roomCode: candidateCode,
-                      version: hostState.version,
-                      updatedAt: hostState.updatedAt,
-                      lastEditedBy: hostState.lastEditedBy,
-                      project: hostState.project,
-                    });
-
-                    setLastEditedBy(hostState.lastEditedBy);
-                    callbacksRef.current.onRemotePatch(
-                      patch,
-                      hostState.lastEditedBy
-                    );
-
-                    broadcastP2p(
-                      {
-                        type: 'project:patched',
-                        patch,
-                        version: hostState.version,
-                        updatedAt: hostState.updatedAt,
-                        lastEditedBy: hostState.lastEditedBy,
-                        originClientId: guestId,
-                      },
-                      conn
-                    );
-                    return;
-                  }
-
-                  if (type === 'room:leave') {
-                    detachGuest();
-                  }
+                  handleGuestMessage(rawData as Record<string, unknown>, conn);
                 });
 
                 conn.on('close', detachGuest);
                 conn.on('error', detachGuest);
               });
 
-              peer.on('disconnected', () => {
-                if (shouldStayConnectedRef.current && !peer.destroyed) {
+              const ensureHostSignalingAlive = () => {
+                if (
+                  shouldStayConnectedRef.current &&
+                  peerRef.current === peer &&
+                  !peer.destroyed &&
+                  peer.disconnected
+                ) {
                   try {
                     peer.reconnect();
                   } catch {
-                    // Ignore reconnect errors
+                    // Ignore transient reconnect error
                   }
                 }
+              };
+
+              peer.on('disconnected', () => {
+                setTimeout(ensureHostSignalingAlive, 800);
               });
+
+              hostWatchdogRef.current = setInterval(ensureHostSignalingAlive, 8000);
 
               saveP2pHostSnapshot(candidateCode, {
                 roomCode: candidateCode,
@@ -736,9 +883,19 @@ export function useGroupSession({
             });
 
             peer.on('error', (err) => {
-              if (settled) return;
               const errType = (err as { type?: string })?.type;
-              if (errType === 'unavailable-id') {
+              if (!settled) {
+                if (errType === 'unavailable-id') {
+                  settled = true;
+                  clearTimeout(timeout);
+                  try {
+                    peer.destroy();
+                  } catch {
+                    // Ignore
+                  }
+                  resolve('unavailable-id');
+                  return;
+                }
                 settled = true;
                 clearTimeout(timeout);
                 try {
@@ -746,17 +903,26 @@ export function useGroupSession({
                 } catch {
                   // Ignore
                 }
-                resolve('unavailable-id');
+                resolve('failed');
                 return;
               }
-              settled = true;
-              clearTimeout(timeout);
-              try {
-                peer.destroy();
-              } catch {
-                // Ignore
+
+              // Post-open transient signaling errors: try to reconnect host signaling
+              if (
+                shouldStayConnectedRef.current &&
+                !peer.destroyed &&
+                peer.disconnected
+              ) {
+                setTimeout(() => {
+                  if (!peer.destroyed && peer.disconnected) {
+                    try {
+                      peer.reconnect();
+                    } catch {
+                      // Ignore
+                    }
+                  }
+                }, 1200);
               }
-              resolve('failed');
             });
           }
         );
@@ -788,39 +954,11 @@ export function useGroupSession({
   );
 
   // ---------------------------------------------------------------------------
-  // P2P WebRTC Guest Join (serverless fallback for Vercel / static hosting)
+  // P2P Guest Join (Same-browser BroadcastChannel fast-lane + WebRTC PeerJS)
   // ---------------------------------------------------------------------------
-  const joinP2pGuest = useCallback(
-    async (codeInput: string): Promise<boolean> => {
-      const code = normalizeCodeInput(codeInput);
-
-      // If this tab previously hosted this exact room, reclaim host on reload
-      let wasHost = false;
-      try {
-        wasHost =
-          window.sessionStorage.getItem(`igcse_stats_p2p_host_${code}`) === '1';
-      } catch {
-        wasHost = false;
-      }
-      if (wasHost) {
-        const saved = loadP2pHostSnapshot(code);
-        if (saved) {
-          const reclaimed = await startP2pHost(code, saved.project, {
-            version: saved.version,
-            updatedAt: saved.updatedAt,
-            lastEditedBy: saved.lastEditedBy,
-          });
-          if (reclaimed) return true;
-        }
-      }
-
-      cleanupTransport();
-      shouldStayConnectedRef.current = true;
-      setTransportMode('p2p');
-      setStatus('connecting');
-      setError(null);
-
-      return new Promise<boolean>((resolve) => {
+  const attemptWebRtcGuestJoin = useCallback(
+    (code: string): Promise<{ ok: boolean; errType?: string }> => {
+      return new Promise((resolve) => {
         let settled = false;
         const peer = new Peer({
           debug: 0,
@@ -828,27 +966,36 @@ export function useGroupSession({
         });
         peerRef.current = peer;
 
-        const timeout = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            shouldStayConnectedRef.current = false;
-            cleanupTransport();
-            setStatus('error');
-            setError(
-              `Timed out connecting to group "${code}". Make sure the host's browser tab is open and online.`
-            );
-            resolve(false);
+        const finish = (ok: boolean, errType?: string) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (!ok) {
+            try {
+              peer.destroy();
+            } catch {
+              // Ignore
+            }
+            if (peerRef.current === peer) {
+              peerRef.current = null;
+            }
+            guestConnRef.current = null;
           }
+          resolve({ ok, errType });
+        };
+
+        const timeout = setTimeout(() => {
+          finish(false, 'timeout');
         }, 12000);
 
         peer.on('open', () => {
-          const conn = peer.connect(`${PEER_PREFIX}${code}`, { reliable: true });
+          const conn = peer.connect(`${PEER_PREFIX}${code}`, {
+            reliable: true,
+            serialization: 'json',
+          });
           guestConnRef.current = conn;
 
           conn.on('open', () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
             reconnectAttemptRef.current = 0;
             setRoomCode(code);
             setStatus('connected');
@@ -889,7 +1036,7 @@ export function useGroupSession({
               }
             }, 15000);
 
-            resolve(true);
+            finish(true);
           });
 
           conn.on('data', (rawData) => {
@@ -933,10 +1080,20 @@ export function useGroupSession({
             }
           });
 
+          conn.on('error', () => {
+            if (!settled) {
+              finish(false, 'conn-error');
+            }
+          });
+
           conn.on('close', () => {
             if (pingTimerRef.current) {
               clearInterval(pingTimerRef.current);
               pingTimerRef.current = null;
+            }
+            if (!settled) {
+              finish(false, 'conn-closed');
+              return;
             }
             if (!shouldStayConnectedRef.current || roomCodeRef.current !== code) {
               return;
@@ -949,51 +1106,258 @@ export function useGroupSession({
             reconnectAttemptRef.current += 1;
             reconnectTimerRef.current = setTimeout(() => {
               if (shouldStayConnectedRef.current && roomCodeRef.current === code) {
-                void joinP2pGuest(code);
+                void attemptWebRtcGuestJoin(code);
               }
             }, delay);
           });
         });
 
-        peer.on('error', async (err) => {
+        peer.on('error', (err) => {
           const errType = (err as { type?: string })?.type;
           if (!settled) {
-            settled = true;
-            clearTimeout(timeout);
-            cleanupTransport();
-
-            if (errType === 'peer-unavailable') {
-              const localBackup = loadP2pHostSnapshot(code);
-              if (localBackup) {
-                const restored = await startP2pHost(code, localBackup.project, {
-                  version: localBackup.version,
-                  updatedAt: localBackup.updatedAt,
-                  lastEditedBy: localBackup.lastEditedBy,
-                });
-                resolve(restored);
-                return;
-              }
-              shouldStayConnectedRef.current = false;
-              setStatus('error');
-              setError(
-                `Group code "${code}" is not active right now. Ask your teammate who created the code to keep their browser tab open.`
-              );
-              resolve(false);
-              return;
-            }
-
-            shouldStayConnectedRef.current = false;
-            setStatus('error');
-            setError(
-              `Could not join group "${code}". Check your internet connection and verify the code.`
-            );
-            resolve(false);
+            finish(false, errType || 'peer-error');
           }
         });
       });
     },
-    [cleanupTransport, startP2pHost]
+    []
   );
+
+  const tryJoinViaBroadcastChannel = useCallback(
+    (code: string): Promise<boolean> => {
+      return new Promise((resolve) => {
+        const bc = createBroadcastChannel(code);
+        if (!bc) {
+          resolve(false);
+          return;
+        }
+
+        let resolved = false;
+        const timer = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            try {
+              bc.close();
+            } catch {
+              // Ignore
+            }
+            resolve(false);
+          }
+        }, 350);
+
+        bc.onmessage = (ev) => {
+          const data = ev.data;
+          if (!data || typeof data !== 'object') return;
+          const msg = data as Record<string, unknown>;
+
+          if (msg.type === 'bc:here' && !resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            bcRef.current = bc;
+            bcGuestActiveRef.current = true;
+            setRoomCode(code);
+            setStatus('connected');
+            setError(null);
+
+            try {
+              window.sessionStorage.setItem('igcse_stats_room_code', code);
+            } catch {
+              // Ignore
+            }
+
+            bc.postMessage({
+              type: 'room:join',
+              roomCode: code,
+              clientId: clientIdRef.current,
+              userName: userNameRef.current.trim() || 'Teammate',
+              role: userRoleRef.current,
+              activeStage: activeStageRef.current,
+            });
+
+            if (pendingPatchesRef.current.length > 0) {
+              const queued = [...pendingPatchesRef.current];
+              pendingPatchesRef.current = [];
+              for (const patch of queued) {
+                bc.postMessage({
+                  type: 'project:patch',
+                  roomCode: code,
+                  clientId: clientIdRef.current,
+                  userName: userNameRef.current.trim() || 'Teammate',
+                  patch,
+                });
+              }
+            }
+
+            resolve(true);
+            return;
+          }
+
+          if (msg.type === 'room:sync') {
+            const target = msg.targetClientId;
+            if (target && target !== clientIdRef.current) return;
+            const room = msg.room as GroupRoomState;
+            setParticipants(room.participants ?? []);
+            setLastEditedBy(room.lastEditedBy ?? null);
+            callbacksRef.current.onFullSync(room);
+            return;
+          }
+
+          if (msg.type === 'presence:updated') {
+            const nextParticipants =
+              (msg.participants as GroupParticipant[]) ?? [];
+            const nextMembers = msg.members as
+              | GroupProjectState['members']
+              | undefined;
+            setParticipants(nextParticipants);
+            callbacksRef.current.onPresenceUpdated(nextParticipants, nextMembers);
+            return;
+          }
+
+          if (msg.type === 'project:patched') {
+            const originClientId = String(msg.originClientId ?? '');
+            const nextEdited =
+              (msg.lastEditedBy as GroupRoomState['lastEditedBy']) ?? null;
+            setLastEditedBy(nextEdited);
+            if (originClientId === clientIdRef.current) return;
+            const patch = msg.patch as GroupProjectPatch;
+            callbacksRef.current.onRemotePatch(patch, nextEdited);
+          }
+        };
+
+        try {
+          bc.postMessage({
+            type: 'bc:discover',
+            clientId: clientIdRef.current,
+          });
+        } catch {
+          clearTimeout(timer);
+          resolved = true;
+          try {
+            bc.close();
+          } catch {
+            // Ignore
+          }
+          resolve(false);
+        }
+      });
+    },
+    []
+  );
+
+  const joinP2pGuest = useCallback(
+    async (codeInput: string): Promise<boolean> => {
+      const code = normalizeCodeInput(codeInput);
+
+      // Reclaim host automatically if this tab previously hosted this exact room
+      let wasHost = false;
+      try {
+        wasHost =
+          window.sessionStorage.getItem(`igcse_stats_p2p_host_${code}`) === '1';
+      } catch {
+        wasHost = false;
+      }
+      if (wasHost) {
+        const saved = loadP2pHostSnapshot(code);
+        if (saved) {
+          const reclaimed = await startP2pHost(code, saved.project, {
+            version: saved.version,
+            updatedAt: saved.updatedAt,
+            lastEditedBy: saved.lastEditedBy,
+          });
+          if (reclaimed) return true;
+        }
+      }
+
+      cleanupTransport();
+      shouldStayConnectedRef.current = true;
+      setTransportMode('p2p');
+      setStatus('connecting');
+      setError(null);
+
+      // Fast-lane for multiple tabs on the same browser/device
+      const joinedViaBc = await tryJoinViaBroadcastChannel(code);
+      if (joinedViaBc) {
+        return true;
+      }
+
+      // Cross-device WebRTC connection with automatic retry if host is briefly reconnecting
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!shouldStayConnectedRef.current) return false;
+
+        const attemptResult = await attemptWebRtcGuestJoin(code);
+        if (attemptResult.ok) {
+          return true;
+        }
+
+        if (attempt === 0 && attemptResult.errType === 'peer-unavailable') {
+          await new Promise((r) => setTimeout(r, 1400));
+          continue;
+        }
+
+        if (attemptResult.errType === 'peer-unavailable') {
+          const localBackup = loadP2pHostSnapshot(code);
+          if (localBackup) {
+            return startP2pHost(code, localBackup.project, {
+              version: localBackup.version,
+              updatedAt: localBackup.updatedAt,
+              lastEditedBy: localBackup.lastEditedBy,
+            });
+          }
+          shouldStayConnectedRef.current = false;
+          setStatus('error');
+          setError(
+            `Group code "${code}" is not active right now. Make sure your teammate has created the code and keeps their browser tab open.`
+          );
+          return false;
+        }
+
+        if (attempt === 0 && attemptResult.errType === 'timeout') {
+          await new Promise((r) => setTimeout(r, 600));
+          continue;
+        }
+
+        shouldStayConnectedRef.current = false;
+        setStatus('error');
+        setError(
+          `Could not connect to group "${code}". Check your internet connection (some strict school/corporate networks block direct peer-to-peer WebRTC) and try again.`
+        );
+        return false;
+      }
+
+      return false;
+    },
+    [
+      attemptWebRtcGuestJoin,
+      cleanupTransport,
+      startP2pHost,
+      tryJoinViaBroadcastChannel,
+    ]
+  );
+
+  // Reconnect host PeerJS signaling immediately when tab regains focus or network returns
+  useEffect(() => {
+    const handleResume = () => {
+      if (
+        shouldStayConnectedRef.current &&
+        transportModeRef.current === 'p2p' &&
+        peerRef.current &&
+        !peerRef.current.destroyed &&
+        peerRef.current.disconnected
+      ) {
+        try {
+          peerRef.current.reconnect();
+        } catch {
+          // Ignore
+        }
+      }
+    };
+    window.addEventListener('online', handleResume);
+    document.addEventListener('visibilitychange', handleResume);
+    return () => {
+      window.removeEventListener('online', handleResume);
+      document.removeEventListener('visibilitychange', handleResume);
+    };
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Sync local stage / name / role changes across whichever transport is active
@@ -1041,14 +1405,36 @@ export function useGroupSession({
           nextParticipants,
           host.project.members
         );
+        const payload = {
+          type: 'presence:updated',
+          participants: nextParticipants,
+          members: host.project.members,
+        };
         for (const c of host.connections) {
-          if (c.open) {
-            c.send({
-              type: 'presence:updated',
-              participants: nextParticipants,
-              members: host.project.members,
-            });
+          sendWhenConnReady(c, payload);
+        }
+        if (bcRef.current) {
+          try {
+            bcRef.current.postMessage(payload);
+          } catch {
+            // Ignore
           }
+        }
+        return;
+      }
+
+      if (bcGuestActiveRef.current && bcRef.current) {
+        try {
+          bcRef.current.postMessage({
+            type: 'presence:stage',
+            roomCode,
+            clientId: clientIdRef.current,
+            userName: trimmedName,
+            role: localUserRole,
+            activeStage,
+          });
+        } catch {
+          // Ignore
         }
         return;
       }
@@ -1077,12 +1463,12 @@ export function useGroupSession({
   // ---------------------------------------------------------------------------
   // Public API: createRoom, joinRoom, leaveRoom, sendPatch
   // ---------------------------------------------------------------------------
-  const ensureBackendDetected = useCallback(async (): Promise<boolean> => {
-    if (backendAvailableRef.current !== null) {
-      return backendAvailableRef.current;
-    }
+  const detectBackend = useCallback(async (): Promise<boolean> => {
+    if (backendConfirmedRef.current) return true;
     const available = await checkServerBackendAvailable();
-    backendAvailableRef.current = available;
+    if (available) {
+      backendConfirmedRef.current = true;
+    }
     return available;
   }, []);
 
@@ -1094,7 +1480,7 @@ export function useGroupSession({
       setError(null);
       setStatus('connecting');
 
-      const hasBackend = await ensureBackendDetected();
+      const hasBackend = await detectBackend();
       if (hasBackend) {
         try {
           const res = await fetch(`${API_BASE}/api/rooms`, {
@@ -1126,16 +1512,15 @@ export function useGroupSession({
             connectServerSocket(createdCode);
             return true;
           }
-          // Non-JSON response means static host without Node API: switch to P2P
-          backendAvailableRef.current = false;
+          backendConfirmedRef.current = false;
         } catch {
-          backendAvailableRef.current = false;
+          backendConfirmedRef.current = false;
         }
       }
 
       return startP2pHost(desiredCode, initialProject);
     },
-    [connectServerSocket, ensureBackendDetected, startP2pHost]
+    [connectServerSocket, detectBackend, startP2pHost]
   );
 
   const joinRoom = useCallback(
@@ -1150,7 +1535,7 @@ export function useGroupSession({
       setError(null);
       setStatus('connecting');
 
-      const hasBackend = await ensureBackendDetected();
+      const hasBackend = await detectBackend();
       if (hasBackend) {
         try {
           const res = await fetch(
@@ -1182,15 +1567,15 @@ export function useGroupSession({
             connectServerSocket(data.room.roomCode);
             return true;
           }
-          backendAvailableRef.current = false;
+          backendConfirmedRef.current = false;
         } catch {
-          backendAvailableRef.current = false;
+          backendConfirmedRef.current = false;
         }
       }
 
       return joinP2pGuest(code);
     },
-    [connectServerSocket, ensureBackendDetected, joinP2pGuest]
+    [connectServerSocket, detectBackend, joinP2pGuest]
   );
 
   const leaveRoom = useCallback(() => {
@@ -1202,6 +1587,16 @@ export function useGroupSession({
     }
     if (guestConnRef.current && guestConnRef.current.open) {
       guestConnRef.current.send({ type: 'room:leave' });
+    }
+    if (bcGuestActiveRef.current && bcRef.current) {
+      try {
+        bcRef.current.postMessage({
+          type: 'room:leave',
+          clientId: clientIdRef.current,
+        });
+      } catch {
+        // Ignore
+      }
     }
 
     cleanupTransport();
@@ -1216,6 +1611,11 @@ export function useGroupSession({
       window.sessionStorage.removeItem('igcse_stats_room_code');
       if (activeCode) {
         window.sessionStorage.removeItem(`igcse_stats_p2p_host_${activeCode}`);
+      }
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('code')) {
+        url.searchParams.delete('code');
+        window.history.replaceState(null, '', url.toString());
       }
     } catch {
       // Ignore
@@ -1246,17 +1646,38 @@ export function useGroupSession({
           lastEditedBy: host.lastEditedBy,
           project: host.project,
         });
+        const payload = {
+          type: 'project:patched',
+          patch,
+          version: host.version,
+          updatedAt: host.updatedAt,
+          lastEditedBy: host.lastEditedBy,
+          originClientId: clientIdRef.current,
+        };
         for (const c of host.connections) {
-          if (c.open) {
-            c.send({
-              type: 'project:patched',
-              patch,
-              version: host.version,
-              updatedAt: host.updatedAt,
-              lastEditedBy: host.lastEditedBy,
-              originClientId: clientIdRef.current,
-            });
+          sendWhenConnReady(c, payload);
+        }
+        if (bcRef.current) {
+          try {
+            bcRef.current.postMessage(payload);
+          } catch {
+            // Ignore
           }
+        }
+        return;
+      }
+
+      if (bcGuestActiveRef.current && bcRef.current) {
+        try {
+          bcRef.current.postMessage({
+            type: 'project:patch',
+            roomCode: code,
+            clientId: clientIdRef.current,
+            userName: editorName,
+            patch,
+          });
+        } catch {
+          // Ignore
         }
         return;
       }

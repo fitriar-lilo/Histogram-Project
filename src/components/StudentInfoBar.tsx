@@ -64,6 +64,31 @@ const STAGE_LABELS: Record<LabStage, string> = {
   histogram: '03. Histogram',
 };
 
+async function copyTextWithFallback(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fallback below
+  }
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function StudentInfoBar({
   identity,
   onChange,
@@ -72,13 +97,17 @@ export function StudentInfoBar({
   const [joinCodeInput, setJoinCodeInput] = useState(groupSession.initialJoinCode ?? '');
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [isBusy, setIsBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'create' | 'join' | null>(null);
 
   useEffect(() => {
     if (groupSession.initialJoinCode) {
       setJoinCodeInput(groupSession.initialJoinCode);
     }
   }, [groupSession.initialJoinCode]);
+
+  const inviteUrl = groupSession.roomCode
+    ? `${window.location.origin}${window.location.pathname}?code=${encodeURIComponent(groupSession.roomCode)}`
+    : '';
 
   const handleModeChange = (mode: WorkMode) => {
     onChange({ ...identity, mode });
@@ -110,40 +139,36 @@ export function StudentInfoBar({
   };
 
   const handleCreateClick = async () => {
-    setIsBusy(true);
+    setPendingAction('create');
     await groupSession.onCreateRoom();
-    setIsBusy(false);
+    setPendingAction(null);
   };
 
   const handleJoinClick = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!joinCodeInput.trim()) return;
-    setIsBusy(true);
-    await groupSession.onJoinRoom(joinCodeInput);
-    setIsBusy(false);
+    const normalized = normalizeCodeInput(joinCodeInput);
+    if (!normalized) return;
+    setJoinCodeInput(normalized);
+    setPendingAction('join');
+    await groupSession.onJoinRoom(normalized);
+    setPendingAction(null);
   };
 
   const handleCopyCode = async () => {
     if (!groupSession.roomCode) return;
-    try {
-      await navigator.clipboard.writeText(groupSession.roomCode);
+    const ok = await copyTextWithFallback(groupSession.roomCode);
+    if (ok) {
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 1800);
-    } catch {
-      // Ignore clipboard failures
     }
   };
 
   const handleCopyInviteLink = async () => {
-    if (!groupSession.roomCode) return;
-    try {
-      const url = new URL(window.location.href);
-      url.searchParams.set('code', groupSession.roomCode);
-      await navigator.clipboard.writeText(url.toString());
+    if (!inviteUrl) return;
+    const ok = await copyTextWithFallback(inviteUrl);
+    if (ok) {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 1800);
-    } catch {
-      // Ignore clipboard failures
     }
   };
 
@@ -253,19 +278,18 @@ export function StudentInfoBar({
                 <div className="lg:col-span-2">
                   <button
                     type="button"
-                    disabled={isBusy || groupSession.status === 'connecting'}
+                    disabled={pendingAction !== null || groupSession.status === 'connecting'}
                     onClick={handleCreateClick}
                     className="w-full inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#1E3A5F] hover:bg-[#173056] disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
                   >
-                    {isBusy && groupSession.status === 'connecting' ? (
+                    {pendingAction === 'create' ||
+                    (groupSession.status === 'connecting' && pendingAction !== 'join' && !joinCodeInput) ? (
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
                     ) : (
                       <Plus className="w-3.5 h-3.5" aria-hidden="true" />
                     )}
                     <span>
-                      {isBusy && groupSession.status === 'connecting'
-                        ? 'Creating...'
-                        : 'Create Group Code'}
+                      {pendingAction === 'create' ? 'Creating...' : 'Create Group Code'}
                     </span>
                   </button>
                 </div>
@@ -278,21 +302,31 @@ export function StudentInfoBar({
                     type="text"
                     value={joinCodeInput}
                     onChange={(e) => setJoinCodeInput(normalizeCodeInput(e.target.value))}
-                    placeholder="Enter Code (e.g. K7M9P2)"
-                    aria-label="Enter existing group code"
+                    placeholder="Paste code or invite link"
+                    aria-label="Enter existing group code or invite link"
                     className="flex-1 min-w-0 px-3 py-2 text-sm font-mono-tabular uppercase bg-white border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 placeholder:normal-case focus:outline-none focus:ring-2 focus:ring-teal-600"
                   />
                   <button
                     type="submit"
                     disabled={
-                      isBusy ||
+                      pendingAction !== null ||
                       groupSession.status === 'connecting' ||
-                      joinCodeInput.trim().length < 4
+                      normalizeCodeInput(joinCodeInput).length < 4
                     }
                     className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <Users className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>Join Code</span>
+                    {pendingAction === 'join' ||
+                    (groupSession.status === 'connecting' && pendingAction !== 'create') ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Users className="w-3.5 h-3.5" aria-hidden="true" />
+                    )}
+                    <span>
+                      {pendingAction === 'join' ||
+                      (groupSession.status === 'connecting' && pendingAction !== 'create')
+                        ? 'Joining...'
+                        : 'Join Code'}
+                    </span>
                   </button>
                 </form>
               </div>
@@ -390,6 +424,26 @@ export function StudentInfoBar({
                   </button>
                 </div>
               </div>
+
+              {inviteUrl && (
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t border-[#DCE8FA]">
+                  <label
+                    htmlFor="share-invite-url"
+                    className="text-[11px] font-medium text-slate-600 shrink-0"
+                  >
+                    Shareable Invite Link:
+                  </label>
+                  <input
+                    id="share-invite-url"
+                    type="text"
+                    readOnly
+                    value={inviteUrl}
+                    onClick={(e) => e.currentTarget.select()}
+                    aria-label="Shareable group invite link"
+                    className="flex-1 min-w-0 px-2.5 py-1 text-[11px] font-mono-tabular text-slate-700 bg-white border border-[#DCE4F0] rounded-md focus:outline-none focus:ring-1 focus:ring-blue-600"
+                  />
+                </div>
+              )}
 
               {/* Device Identity & Live Active Teammates */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 pt-2 border-t border-[#DCE8FA] items-center">

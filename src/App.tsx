@@ -43,12 +43,6 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  const [mode, setMode] = useState<WorkMode>('individual');
-  const [individualName, setIndividualName] = useState<string>('');
-  const [project, setProject] = useState<GroupProjectState>(() =>
-    createEmptyGroupProject()
-  );
-
   const [initialJoinCode] = useState<string>(() => {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -60,6 +54,20 @@ export default function App() {
       return '';
     }
   });
+
+  const [mode, setMode] = useState<WorkMode>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const fromUrl = params.get('code');
+      return fromUrl && normalizeCodeInput(fromUrl).length >= 4 ? 'group' : 'individual';
+    } catch {
+      return 'individual';
+    }
+  });
+  const [individualName, setIndividualName] = useState<string>('');
+  const [project, setProject] = useState<GroupProjectState>(() =>
+    createEmptyGroupProject()
+  );
 
   const handleFullSync = useCallback((room: GroupRoomState) => {
     setProject(room.project);
@@ -85,6 +93,8 @@ export default function App() {
     onPresenceUpdated: handlePresenceUpdated,
   });
 
+  const { joinRoom: joinGroupSessionRoom, roomCode: activeRoomCode } = groupSession;
+
   // Auto-join if opened with ?code=XXXX or returning to an active session in this tab
   const didAutoJoinRef = useRef(false);
   useEffect(() => {
@@ -92,9 +102,23 @@ export default function App() {
     didAutoJoinRef.current = true;
     if (initialJoinCode.length >= 4) {
       setMode('group');
-      void groupSession.joinRoom(initialJoinCode);
+      void joinGroupSessionRoom(initialJoinCode);
     }
-  }, [groupSession, initialJoinCode]);
+  }, [joinGroupSessionRoom, initialJoinCode]);
+
+  // Keep ?code= in the address bar synced while connected so sharing URL or refreshing works seamlessly
+  useEffect(() => {
+    if (!activeRoomCode) return;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('code') !== activeRoomCode) {
+        url.searchParams.set('code', activeRoomCode);
+        window.history.replaceState(null, '', url.toString());
+      }
+    } catch {
+      // Ignore history errors
+    }
+  }, [activeRoomCode]);
 
   // Throttle continuous histogram bar drag patches while keeping local UI instant
   const barThrottleRef = useRef<{
