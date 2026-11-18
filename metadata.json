@@ -1,0 +1,6 @@
+{
+  "name": "IGCSE 0580 Statistics Lab",
+  "description": "Interactive Cambridge IGCSE 0580 Mathematics platform for grouped frequency tables, mid-values, estimated mean, modal class, and equal-width histograms with step-by-step feedback and PDF export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
