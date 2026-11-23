@@ -37,6 +37,20 @@ export function createEmptyGroupProject(): GroupProjectState {
       realConditionMeaning: '',
     },
     hasCheckedHistogram: false,
+    cumTitle: '',
+    cumRawInputText: '',
+    cumVariableName: '',
+    cumUnit: '',
+    cumWidthType: 'equal',
+    cumStartBound: 0,
+    cumEqualWidth: 10,
+    cumUnequalWidths: [10, 5, 5, 10, 20],
+    cumTableInputs: {},
+    hasCheckedCumTable: false,
+    cumPoints: [],
+    cumCurveConnected: false,
+    cumReflection: '',
+    hasCheckedCumCurve: false,
   };
 }
 
@@ -206,11 +220,126 @@ export function applyProjectPatch(
     };
   }
 
+  // Stage 04 & 05: Cumulative Frequency Patches
+  if (patch.clearAllCumData) {
+    next = {
+      ...next,
+      cumTitle: '',
+      cumRawInputText: '',
+      cumVariableName: '',
+      cumUnit: '',
+      cumWidthType: 'equal',
+      cumStartBound: 0,
+      cumEqualWidth: 10,
+      cumUnequalWidths: [10, 5, 5, 10, 20],
+      cumTableInputs: {},
+      hasCheckedCumTable: false,
+      cumPoints: [],
+      cumCurveConnected: false,
+      cumReflection: '',
+      hasCheckedCumCurve: false,
+    };
+  }
+
+  if (patch.cumRaw) {
+    const cumConfigChanged =
+      (patch.cumRaw.cumRawInputText !== undefined &&
+        patch.cumRaw.cumRawInputText !== prev.cumRawInputText) ||
+      (patch.cumRaw.cumWidthType !== undefined &&
+        patch.cumRaw.cumWidthType !== prev.cumWidthType) ||
+      (patch.cumRaw.cumStartBound !== undefined &&
+        patch.cumRaw.cumStartBound !== prev.cumStartBound) ||
+      (patch.cumRaw.cumEqualWidth !== undefined &&
+        patch.cumRaw.cumEqualWidth !== prev.cumEqualWidth) ||
+      patch.cumRaw.cumUnequalWidths !== undefined;
+
+    next = {
+      ...next,
+      ...patch.cumRaw,
+      ...(cumConfigChanged
+        ? { hasCheckedCumTable: false, hasCheckedCumCurve: false }
+        : {}),
+    };
+  }
+
+  if (patch.cumTableReset) {
+    next = {
+      ...next,
+      cumTableInputs: {},
+      hasCheckedCumTable: false,
+    };
+  }
+
+  if (patch.cumTableCell) {
+    const { intervalId, field, value } = patch.cumTableCell;
+    const existingRow = next.cumTableInputs[intervalId] ?? {
+      lowerBound: '',
+      upperBound: '',
+      frequency: '',
+      cumulativeFrequency: '',
+    };
+    next = {
+      ...next,
+      cumTableInputs: {
+        ...next.cumTableInputs,
+        [intervalId]: {
+          ...existingRow,
+          [field]: value,
+        },
+      },
+    };
+  }
+
+  if (typeof patch.hasCheckedCumTable === 'boolean') {
+    next = {
+      ...next,
+      hasCheckedCumTable: patch.hasCheckedCumTable,
+    };
+  }
+
+  if (patch.cumCurveReset) {
+    next = {
+      ...next,
+      cumPoints: [],
+      cumCurveConnected: false,
+      hasCheckedCumCurve: false,
+    };
+  }
+
+  if (Array.isArray(patch.cumPoints)) {
+    next = {
+      ...next,
+      cumPoints: patch.cumPoints,
+    };
+  }
+
+  if (typeof patch.cumCurveConnected === 'boolean') {
+    next = {
+      ...next,
+      cumCurveConnected: patch.cumCurveConnected,
+    };
+  }
+
+  if (typeof patch.cumReflection === 'string') {
+    next = {
+      ...next,
+      cumReflection: patch.cumReflection,
+    };
+  }
+
+  if (typeof patch.hasCheckedCumCurve === 'boolean') {
+    next = {
+      ...next,
+      hasCheckedCumCurve: patch.hasCheckedCumCurve,
+    };
+  }
+
   return next;
 }
 
 export function describePatchSection(patch: GroupProjectPatch): string {
   if (patch.clearAllData) return 'Cleared Project Data';
+  if (patch.clearAllCumData) return 'Cleared Cumulative Data';
   if (patch.meta) return 'Group Details';
   if (patch.raw) return 'Stage 01 · Raw Data & Width';
   if (patch.tableCell || patch.tableReset || patch.hasCheckedTable !== undefined) {
@@ -222,6 +351,23 @@ export function describePatchSection(patch: GroupProjectPatch): string {
   }
   if (patch.reflectionField || patch.clearReflections) {
     return 'Stage 03 · Written Reflection';
+  }
+  if (
+    patch.cumRaw ||
+    patch.cumTableCell ||
+    patch.cumTableReset ||
+    patch.hasCheckedCumTable !== undefined
+  ) {
+    return 'Stage 04 · Cumulative Data & Table';
+  }
+  if (
+    patch.cumPoints ||
+    patch.cumCurveConnected !== undefined ||
+    patch.cumCurveReset ||
+    patch.cumReflection !== undefined ||
+    patch.hasCheckedCumCurve !== undefined
+  ) {
+    return 'Stage 05 · Cumulative Frequency Curve';
   }
   return 'Project Update';
 }

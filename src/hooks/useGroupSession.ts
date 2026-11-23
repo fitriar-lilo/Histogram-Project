@@ -597,9 +597,13 @@ export function useGroupSession({
                   const guestRole =
                     String(msg.role ?? 'Collaborator').trim().slice(0, 60) ||
                     'Collaborator';
-                  const guestStage = (['data', 'table', 'histogram'].includes(
-                    String(msg.activeStage)
-                  )
+                  const guestStage = ([
+                    'data',
+                    'table',
+                    'histogram',
+                    'cum-data',
+                    'cum-curve',
+                  ].includes(String(msg.activeStage))
                     ? String(msg.activeStage)
                     : 'data') as LabStage;
 
@@ -671,9 +675,13 @@ export function useGroupSession({
                   const existing = hostState.participants.get(guestId);
                   if (!existing) return;
 
-                  const nextStage = (['data', 'table', 'histogram'].includes(
-                    String(msg.activeStage)
-                  )
+                  const nextStage = ([
+                    'data',
+                    'table',
+                    'histogram',
+                    'cum-data',
+                    'cum-curve',
+                  ].includes(String(msg.activeStage))
                     ? String(msg.activeStage)
                     : existing.activeStage) as LabStage;
                   const nextName =

@@ -1,6 +1,8 @@
 export type WorkMode = 'individual' | 'group';
 
-export type LabStage = 'data' | 'table' | 'histogram';
+export type LabStage = 'data' | 'table' | 'histogram' | 'cum-data' | 'cum-curve';
+
+export type ClassWidthType = 'equal' | 'unequal';
 
 export interface GroupMember {
   id: string;
@@ -107,6 +109,54 @@ export interface StudentHistogramReflection {
   realConditionMeaning: string;
 }
 
+// ---------------------------------------------------------------------------
+// Stage 04 & 05: Cumulative Frequency Data, Table & Ogive Curve
+// ---------------------------------------------------------------------------
+
+export interface CumulativeInterval {
+  id: string;
+  lower: number;
+  upper: number;
+  trueWidth: number;
+  trueFrequency: number;
+  trueCumulativeFrequency: number;
+}
+
+export interface StudentCumulativeTableInputs {
+  /** Keyed by CumulativeInterval.id */
+  [intervalId: string]: {
+    lowerBound: string;
+    upperBound: string;
+    frequency: string;
+    cumulativeFrequency: string;
+  };
+}
+
+export interface CumulativeRowFeedback {
+  intervalId: string;
+  interval: IntervalFeedback;
+  frequency: CellFeedback;
+  cumulativeFrequency: CellFeedback;
+}
+
+export interface CumulativePoint {
+  id: string;
+  x: number;
+  y: number;
+}
+
+export interface CumulativePointFeedback {
+  targetIndex: number;
+  label: string;
+  expectedX: number;
+  expectedY: number;
+  matchedPointId: string | null;
+  plottedX: number | null;
+  plottedY: number | null;
+  status: 'accurate' | 'close' | 'off' | 'missing';
+  guidance: string;
+}
+
 export interface GroupProjectState {
   groupName: string;
   members: GroupMember[];
@@ -124,6 +174,21 @@ export interface GroupProjectState {
   histogramBars: StudentHistogramBar[];
   histogramReflection: StudentHistogramReflection;
   hasCheckedHistogram: boolean;
+  // Stage 04 & 05: Cumulative Frequency
+  cumTitle: string;
+  cumRawInputText: string;
+  cumVariableName: string;
+  cumUnit: string;
+  cumWidthType: ClassWidthType;
+  cumStartBound: number;
+  cumEqualWidth: number;
+  cumUnequalWidths: number[];
+  cumTableInputs: StudentCumulativeTableInputs;
+  hasCheckedCumTable: boolean;
+  cumPoints: CumulativePoint[];
+  cumCurveConnected: boolean;
+  cumReflection: string;
+  hasCheckedCumCurve: boolean;
 }
 
 export interface GroupParticipant {
@@ -135,11 +200,27 @@ export interface GroupParticipant {
 }
 
 export interface GroupProjectPatch {
-  meta?: Partial<Pick<GroupProjectState, 'groupName' | 'members' | 'classSection' | 'date' | 'topicTitle'>>;
-  raw?: Partial<Pick<GroupProjectState, 'rawInputText' | 'variableName' | 'unit' | 'startBound' | 'classWidth'>>;
+  meta?: Partial<
+    Pick<
+      GroupProjectState,
+      'groupName' | 'members' | 'classSection' | 'date' | 'topicTitle'
+    >
+  >;
+  raw?: Partial<
+    Pick<
+      GroupProjectState,
+      'rawInputText' | 'variableName' | 'unit' | 'startBound' | 'classWidth'
+    >
+  >;
   tableCell?: {
     intervalId: string;
-    field: 'lowerBound' | 'upperBound' | 'classWidth' | 'midValue' | 'frequency' | 'fxProduct';
+    field:
+      | 'lowerBound'
+      | 'upperBound'
+      | 'classWidth'
+      | 'midValue'
+      | 'frequency'
+      | 'fxProduct';
     value: string;
   };
   tableReset?: boolean;
@@ -160,6 +241,33 @@ export interface GroupProjectPatch {
   clearReflections?: boolean;
   hasCheckedHistogram?: boolean;
   clearAllData?: boolean;
+  // Stage 04 & 05 patches
+  cumRaw?: Partial<
+    Pick<
+      GroupProjectState,
+      | 'cumTitle'
+      | 'cumRawInputText'
+      | 'cumVariableName'
+      | 'cumUnit'
+      | 'cumWidthType'
+      | 'cumStartBound'
+      | 'cumEqualWidth'
+      | 'cumUnequalWidths'
+    >
+  >;
+  cumTableCell?: {
+    intervalId: string;
+    field: 'lowerBound' | 'upperBound' | 'frequency' | 'cumulativeFrequency';
+    value: string;
+  };
+  cumTableReset?: boolean;
+  hasCheckedCumTable?: boolean;
+  cumPoints?: CumulativePoint[];
+  cumCurveConnected?: boolean;
+  cumCurveReset?: boolean;
+  cumReflection?: string;
+  hasCheckedCumCurve?: boolean;
+  clearAllCumData?: boolean;
 }
 
 export interface GroupRoomState {
@@ -174,4 +282,3 @@ export interface GroupRoomState {
   project: GroupProjectState;
   participants: GroupParticipant[];
 }
-

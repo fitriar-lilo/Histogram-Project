@@ -316,7 +316,13 @@ async function startServer(): Promise<void> {
         const clientId = String(msg.clientId ?? '').slice(0, 64);
         const userName = String(msg.userName ?? 'Teammate').trim().slice(0, 60) || 'Teammate';
         const role = String(msg.role ?? 'Collaborator').trim().slice(0, 60) || 'Collaborator';
-        const activeStage = (['data', 'table', 'histogram'].includes(String(msg.activeStage))
+        const activeStage = ([
+          'data',
+          'table',
+          'histogram',
+          'cum-data',
+          'cum-curve',
+        ].includes(String(msg.activeStage))
           ? String(msg.activeStage)
           : 'data') as LabStage;
 
@@ -386,7 +392,13 @@ async function startServer(): Promise<void> {
         const existing = participants?.get(meta.clientId);
         if (!participants || !existing) return;
 
-        const nextStage = (['data', 'table', 'histogram'].includes(String(msg.activeStage))
+        const nextStage = ([
+          'data',
+          'table',
+          'histogram',
+          'cum-data',
+          'cum-curve',
+        ].includes(String(msg.activeStage))
           ? String(msg.activeStage)
           : existing.activeStage) as LabStage;
         const nextName =

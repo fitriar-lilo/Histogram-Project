@@ -7,10 +7,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Stage1RawData } from './components/Stage1RawData';
 import { Stage2FrequencyTable } from './components/Stage2FrequencyTable';
 import { Stage3HistogramBuilder } from './components/Stage3HistogramBuilder';
+import { Stage4CumulativeDataTable } from './components/Stage4CumulativeDataTable';
+import { Stage5CumulativeCurve } from './components/Stage5CumulativeCurve';
 import { StudentInfoBar } from './components/StudentInfoBar';
 import { TopBar } from './components/TopBar';
 import { normalizeCodeInput, useGroupSession } from './hooks/useGroupSession';
 import type {
+  CumulativePoint,
   GroupParticipant,
   GroupProjectPatch,
   GroupProjectState,
@@ -24,7 +27,11 @@ import type {
 import { applyProjectPatch, createEmptyGroupProject } from './utils/groupSync';
 import {
   buildEqualBoundaries,
+  buildUnequalBoundaries,
+  computeCumulativeIntervals,
   computeIntervals,
+  evaluateCumulativeCurve,
+  evaluateCumulativeTable,
   evaluateHistogram,
   evaluateSummaryCalculations,
   evaluateTable,
@@ -36,6 +43,8 @@ const STAGES: { id: LabStage; step: string; title: string }[] = [
   { id: 'data', step: '01.', title: 'Raw Data & Equal Width' },
   { id: 'table', step: '02.', title: 'Frequency Table, Mean & Mode' },
   { id: 'histogram', step: '03.', title: 'Manual Histogram & PDF' },
+  { id: 'cum-data', step: '04.', title: 'Cumulative Data & Table' },
+  { id: 'cum-curve', step: '05.', title: 'Cumulative Frequency Curve' },
 ];
 
 export default function App() {
@@ -220,6 +229,48 @@ export default function App() {
     [intervals, project.histogramBars]
   );
 
+  // Stage 04 & 05: Cumulative Frequency computations (with defensive defaults for older rooms)
+  const cumWidthType = project.cumWidthType ?? 'equal';
+  const cumStartBound = project.cumStartBound ?? 0;
+  const cumEqualWidth = project.cumEqualWidth ?? 10;
+  const cumUnequalWidths = useMemo(
+    () => project.cumUnequalWidths ?? [10, 5, 5, 10, 20],
+    [project.cumUnequalWidths]
+  );
+  const cumTableInputs = useMemo(
+    () => project.cumTableInputs ?? {},
+    [project.cumTableInputs]
+  );
+  const cumPoints = useMemo(() => project.cumPoints ?? [], [project.cumPoints]);
+  const cumCurveConnected = project.cumCurveConnected ?? false;
+
+  const cumRawValues = useMemo(
+    () => parseNumberList(project.cumRawInputText ?? '').values,
+    [project.cumRawInputText]
+  );
+
+  const cumBoundaries = useMemo(() => {
+    if (cumWidthType === 'unequal') {
+      return buildUnequalBoundaries(cumStartBound, cumUnequalWidths);
+    }
+    return buildEqualBoundaries(cumRawValues, cumStartBound, cumEqualWidth);
+  }, [cumWidthType, cumStartBound, cumEqualWidth, cumUnequalWidths, cumRawValues]);
+
+  const cumIntervals = useMemo(
+    () => computeCumulativeIntervals(cumRawValues, cumBoundaries),
+    [cumRawValues, cumBoundaries]
+  );
+
+  const cumTableFeedback = useMemo(
+    () => evaluateCumulativeTable(cumIntervals, cumTableInputs),
+    [cumIntervals, cumTableInputs]
+  );
+
+  const cumCurveFeedback = useMemo(
+    () => evaluateCumulativeCurve(cumIntervals, cumPoints),
+    [cumIntervals, cumPoints]
+  );
+
   const handleUpdateTableCell = (
     intervalId: string,
     field: 'lowerBound' | 'upperBound' | 'classWidth' | 'midValue' | 'frequency' | 'fxProduct',
@@ -249,6 +300,31 @@ export default function App() {
     applyLocalPatch({ reflectionField: { field, value } });
   };
 
+  const handleUpdateCumTableCell = (
+    intervalId: string,
+    field: 'lowerBound' | 'upperBound' | 'frequency' | 'cumulativeFrequency',
+    value: string
+  ) => {
+    applyLocalPatch({ cumTableCell: { intervalId, field, value } });
+  };
+
+  const handleUpdateCumPoints = (points: CumulativePoint[]) => {
+    applyLocalPatch({ cumPoints: points });
+  };
+
+  const handleCopyFromStage1ToCum = () => {
+    applyLocalPatch({
+      cumRaw: {
+        cumTitle: project.topicTitle || '',
+        cumRawInputText: project.rawInputText || '',
+        cumVariableName: project.variableName || '',
+        cumUnit: project.unit || '',
+        cumStartBound: project.startBound ?? 0,
+        cumEqualWidth: project.classWidth ?? 10,
+      },
+    });
+  };
+
   const handleCreateGroupRoom = async (): Promise<boolean> => {
     return groupSession.createRoom(project);
   };
@@ -274,6 +350,18 @@ export default function App() {
         histogramBars: project.histogramBars,
         histogramFeedback,
         histogramReflection: project.histogramReflection,
+        cumTitle: project.cumTitle ?? '',
+        cumVariableName: project.cumVariableName ?? '',
+        cumUnit: project.cumUnit ?? '',
+        cumWidthType,
+        cumRawValues,
+        cumIntervals,
+        cumTableInputs,
+        cumTableFeedback,
+        cumPoints,
+        cumCurveConnected,
+        cumCurveFeedback,
+        cumReflection: project.cumReflection ?? '',
       });
     } catch (err) {
       setExportError(
@@ -338,7 +426,7 @@ export default function App() {
         <div
           role="tablist"
           aria-label="Investigation stages"
-          className="grid grid-cols-1 sm:grid-cols-3 gap-2 bg-[#162E54]/85 p-1.5 rounded-xl border border-[#3B629C]"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 bg-[#162E54]/85 p-1.5 rounded-xl border border-[#3B629C]"
         >
           {STAGES.map((stage) => {
             const isActive = activeStage === stage.id;
@@ -433,6 +521,58 @@ export default function App() {
             reflection={project.histogramReflection}
             onUpdateReflection={handleUpdateReflection}
             onClearReflections={() => applyLocalPatch({ clearReflections: true })}
+            onDownloadPdf={handleDownloadPdf}
+            isExporting={isExporting}
+          />
+        )}
+
+        {activeStage === 'cum-data' && (
+          <Stage4CumulativeDataTable
+            cumTitle={project.cumTitle ?? ''}
+            cumRawInputText={project.cumRawInputText ?? ''}
+            cumVariableName={project.cumVariableName ?? ''}
+            cumUnit={project.cumUnit ?? ''}
+            cumWidthType={cumWidthType}
+            cumStartBound={cumStartBound}
+            cumEqualWidth={cumEqualWidth}
+            cumUnequalWidths={cumUnequalWidths}
+            cumRawValues={cumRawValues}
+            cumBoundaries={cumBoundaries}
+            cumIntervals={cumIntervals}
+            cumTableInputs={cumTableInputs}
+            cumTableFeedback={cumTableFeedback}
+            hasCheckedCumTable={project.hasCheckedCumTable ?? false}
+            hasStage1Data={rawValues.length > 0}
+            onCopyFromStage1={handleCopyFromStage1ToCum}
+            onUpdateCumConfig={(cumPatch) => applyLocalPatch({ cumRaw: cumPatch })}
+            onUpdateCumTableCell={handleUpdateCumTableCell}
+            onResetCumTable={() => applyLocalPatch({ cumTableReset: true })}
+            onCheckCumTable={() => applyLocalPatch({ hasCheckedCumTable: true })}
+            onClearAllCumData={() => applyLocalPatch({ clearAllCumData: true })}
+            onNextStage={() => setActiveStage('cum-curve')}
+          />
+        )}
+
+        {activeStage === 'cum-curve' && (
+          <Stage5CumulativeCurve
+            cumTitle={project.cumTitle ?? ''}
+            cumVariableName={project.cumVariableName ?? ''}
+            cumUnit={project.cumUnit ?? ''}
+            cumWidthType={cumWidthType}
+            cumIntervals={cumIntervals}
+            cumTableInputs={cumTableInputs}
+            points={cumPoints}
+            curveConnected={cumCurveConnected}
+            feedback={cumCurveFeedback}
+            hasChecked={project.hasCheckedCumCurve ?? false}
+            reflection={project.cumReflection ?? ''}
+            onUpdatePoints={handleUpdateCumPoints}
+            onToggleCurveConnected={(connected) =>
+              applyLocalPatch({ cumCurveConnected: connected })
+            }
+            onResetCurve={() => applyLocalPatch({ cumCurveReset: true })}
+            onCheckCurve={() => applyLocalPatch({ hasCheckedCumCurve: true })}
+            onUpdateReflection={(text) => applyLocalPatch({ cumReflection: text })}
             onDownloadPdf={handleDownloadPdf}
             isExporting={isExporting}
           />

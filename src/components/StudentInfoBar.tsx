@@ -55,6 +55,7 @@ const ROLE_OPTIONS = [
   'Frequency & Mid-Value Table',
   'Mean & Modal Class',
   'Histogram Builder',
+  'Cumulative Data & Curve',
   'Verification & PDF',
 ];
 
@@ -62,6 +63,8 @@ const STAGE_LABELS: Record<LabStage, string> = {
   data: '01. Raw Data',
   table: '02. Frequency Table',
   histogram: '03. Histogram',
+  'cum-data': '04. Cumulative Table',
+  'cum-curve': '05. Cumulative Curve',
 };
 
 async function copyTextWithFallback(text: string): Promise<boolean> {
@@ -183,7 +186,7 @@ export function StudentInfoBar({
             Statistical Investigation Worksheet
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Cambridge IGCSE Mathematics 0580 · Grouped Mean, Modal Class &amp; Equal Class Width Histograms
+            Cambridge IGCSE Mathematics 0580 · Grouped Mean, Modal Class, Histograms &amp; Cumulative Frequency
           </p>
         </div>
 

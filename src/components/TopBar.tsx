@@ -12,6 +12,8 @@ const NAV_ITEMS: { id: LabStage; label: string }[] = [
   { id: 'data', label: 'Raw Data' },
   { id: 'table', label: 'Frequency Table' },
   { id: 'histogram', label: 'Histogram' },
+  { id: 'cum-data', label: 'Cumulative Table' },
+  { id: 'cum-curve', label: 'Cumulative Curve' },
 ];
 
 export function TopBar({
@@ -22,7 +24,7 @@ export function TopBar({
 }: TopBarProps) {
   return (
     <header className="sticky top-0 z-30 bg-[#14294A]/95 backdrop-blur border-b border-[#34598F]">
-      <div className="max-w-[1360px] mx-auto px-6 py-3.5 flex items-center justify-between gap-8">
+      <div className="max-w-[1360px] mx-auto px-6 py-3.5 flex items-center justify-between gap-6">
         <a
           href="#top"
           onClick={(e) => {
@@ -36,7 +38,7 @@ export function TopBar({
 
         <nav
           aria-label="Statistics workflow stages"
-          className="hidden md:flex items-center gap-7 text-sm font-medium"
+          className="hidden lg:flex items-center gap-5 xl:gap-7 text-sm font-medium"
         >
           {NAV_ITEMS.map((item) => {
             const isActive = activeStage === item.id;

@@ -1,8 +1,14 @@
 import { jsPDF } from 'jspdf';
 import {
   ClassInterval,
+  ClassWidthType,
+  CumulativeInterval,
+  CumulativePoint,
+  CumulativePointFeedback,
+  CumulativeRowFeedback,
   HistogramBarFeedback,
   RowFeedback,
+  StudentCumulativeTableInputs,
   StudentHistogramBar,
   StudentHistogramReflection,
   StudentIdentity,
@@ -10,7 +16,12 @@ import {
   StudentTableInputs,
   SummaryFeedback,
 } from '../types/statistics';
-import { formatNum, getTrueTableTotals, niceAxisMax } from './mathStats';
+import {
+  buildSmoothOgivePath,
+  formatNum,
+  getTrueTableTotals,
+  niceAxisMax,
+} from './mathStats';
 
 export interface PdfReportPayload {
   identity: StudentIdentity;
@@ -25,6 +36,19 @@ export interface PdfReportPayload {
   histogramBars: StudentHistogramBar[];
   histogramFeedback: HistogramBarFeedback[];
   histogramReflection: StudentHistogramReflection;
+  // Stage 04 & 05: Cumulative Frequency
+  cumTitle?: string;
+  cumVariableName?: string;
+  cumUnit?: string;
+  cumWidthType?: ClassWidthType;
+  cumRawValues?: number[];
+  cumIntervals?: CumulativeInterval[];
+  cumTableInputs?: StudentCumulativeTableInputs;
+  cumTableFeedback?: CumulativeRowFeedback[];
+  cumPoints?: CumulativePoint[];
+  cumCurveConnected?: boolean;
+  cumCurveFeedback?: CumulativePointFeedback[];
+  cumReflection?: string;
 }
 
 const PT_TO_MM = 0.352778;
@@ -207,6 +231,146 @@ function buildHistogramSvgString(
   </svg>`;
 }
 
+function buildCumulativeCurveSvgString(
+  intervals: CumulativeInterval[],
+  points: CumulativePoint[],
+  curveConnected: boolean,
+  feedback: CumulativePointFeedback[],
+  variableName: string,
+  unit: string
+): string {
+  const width = 760;
+  const height = 430;
+  const pad = { top: 30, right: 32, bottom: 60, left: 66 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+
+  const minX =
+    intervals.length > 0
+      ? intervals[0].lower
+      : points.length > 0
+      ? Math.min(...points.map((p) => p.x))
+      : 0;
+  const maxX =
+    intervals.length > 0
+      ? intervals[intervals.length - 1].upper
+      : points.length > 0
+      ? Math.max(...points.map((p) => p.x)) + 10
+      : 100;
+  const xSpan = Math.max(1e-6, maxX - minX);
+
+  const maxTrueCf =
+    intervals.length > 0
+      ? intervals[intervals.length - 1].trueCumulativeFrequency
+      : 10;
+  const maxPlottedY = Math.max(0, ...points.map((p) => p.y));
+  const yMax = niceAxisMax(Math.max(5, maxTrueCf, maxPlottedY) * 1.15, 5);
+
+  const sx = (x: number) => pad.left + ((x - minX) / xSpan) * plotW;
+  const sy = (y: number) => pad.top + plotH - (y / Math.max(1e-6, yMax)) * plotH;
+
+  const gridLines: string[] = [];
+  const yTicks = 5;
+  for (let i = 0; i <= yTicks; i++) {
+    const val = (yMax / yTicks) * i;
+    const y = sy(val);
+    gridLines.push(
+      `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#E2E8F0" stroke-width="1" />`
+    );
+    gridLines.push(
+      `<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-family="'IBM Plex Mono', 'Courier New', monospace" font-size="11" fill="#475569">${escapeXml(formatNum(val, 1))}</text>`
+    );
+  }
+
+  const boundarySet = new Set<number>();
+  intervals.forEach((iv) => {
+    boundarySet.add(iv.lower);
+    boundarySet.add(iv.upper);
+  });
+  const sortedBoundaries = Array.from(boundarySet).sort((a, b) => a - b);
+  const stepPx =
+    sortedBoundaries.length > 1 ? plotW / (sortedBoundaries.length - 1) : plotW;
+  const xTickFontSize = stepPx < 28 ? 9 : stepPx < 40 ? 10 : 11;
+  let lastLabelRight = -Infinity;
+
+  sortedBoundaries.forEach((b, idx) => {
+    const x = sx(b);
+    gridLines.push(
+      `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + plotH}" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3 3" />`
+    );
+
+    const labelStr = formatNum(b);
+    const estHalfW = (labelStr.length * xTickFontSize * 0.64) / 2;
+    const isLast = idx === sortedBoundaries.length - 1;
+    const leftEdge = x - estHalfW;
+    const rightEdge = x + estHalfW;
+
+    if (leftEdge >= lastLabelRight + 6 || (isLast && leftEdge >= lastLabelRight + 2)) {
+      gridLines.push(
+        `<text x="${x}" y="${pad.top + plotH + 18}" text-anchor="middle" font-family="'IBM Plex Mono', 'Courier New', monospace" font-size="${xTickFontSize}" fill="#475569">${escapeXml(labelStr)}</text>`
+      );
+      lastLabelRight = rightEdge;
+    }
+  });
+
+  const sortedPts = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
+  const sortedPx = sortedPts.map((p) => ({ x: sx(p.x), y: sy(p.y) }));
+  const pathD =
+    curveConnected && sortedPx.length >= 2 ? buildSmoothOgivePath(sortedPx) : '';
+  const areaD =
+    pathD && sortedPx.length >= 2
+      ? `${pathD} L ${sortedPx[sortedPx.length - 1].x.toFixed(2)} ${(
+          pad.top + plotH
+        ).toFixed(2)} L ${sortedPx[0].x.toFixed(2)} ${(pad.top + plotH).toFixed(2)} Z`
+      : '';
+
+  const statusMap = new Map<string, CumulativePointFeedback['status']>();
+  feedback.forEach((fb) => {
+    if (fb.matchedPointId) statusMap.set(fb.matchedPointId, fb.status);
+  });
+
+  const pointMarks = sortedPts
+    .map((pt) => {
+      const cx = sx(pt.x);
+      const cy = sy(pt.y);
+      const st = statusMap.get(pt.id);
+      const stroke =
+        st === 'accurate' || st === 'close'
+          ? '#059669'
+          : st === 'off'
+          ? '#D97706'
+          : '#1D4ED8';
+      const fill =
+        st === 'accurate' || st === 'close'
+          ? '#D1FAE5'
+          : st === 'off'
+          ? '#FEF3C7'
+          : '#FFFFFF';
+      const ly = Math.max(pad.top + 13, cy - 10);
+      return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="5" fill="${fill}" stroke="${stroke}" stroke-width="2" />
+      <text x="${cx.toFixed(2)}" y="${ly.toFixed(2)}" text-anchor="middle" font-family="'IBM Plex Mono', 'Courier New', monospace" font-size="9" font-weight="600" fill="#1E293B">(${escapeXml(formatNum(pt.x, 1))}, ${escapeXml(formatNum(pt.y, 1))})</text>`;
+    })
+    .join('');
+
+  const rawAxisTitle = unit
+    ? `${variableName || 'Upper Boundary'} (${unit})`
+    : variableName || 'Upper Boundary';
+  const xAxisTitle =
+    rawAxisTitle.length > 68 ? `${rawAxisTitle.slice(0, 65)}...` : rawAxisTitle;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    <rect width="${width}" height="${height}" fill="#FFFFFF" />
+    ${gridLines.join('')}
+    ${areaD ? `<path d="${areaD}" fill="#DBEAFE" fill-opacity="0.35" />` : ''}
+    ${pathD ? `<path d="${pathD}" fill="none" stroke="#2563EB" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />` : ''}
+    ${pointMarks}
+    <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#0F172A" stroke-width="1.5" />
+    <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#0F172A" stroke-width="1.5" />
+    <text x="${pad.left + plotW / 2}" y="${height - 14}" text-anchor="middle" font-family="'DM Sans', Arial, Helvetica, sans-serif" font-size="12" font-weight="600" fill="#1E293B">${escapeXml(xAxisTitle)}</text>
+    <text x="18" y="${pad.top + plotH / 2}" text-anchor="middle" transform="rotate(-90 18 ${pad.top + plotH / 2})" font-family="'DM Sans', Arial, Helvetica, sans-serif" font-size="12" font-weight="600" fill="#1E293B">Cumulative Frequency (cf)</text>
+  </svg>`;
+}
+
 async function svgToPngDataUrl(svgString: string, width = 1520, height = 860): Promise<string> {
   return new Promise((resolve, reject) => {
     const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
@@ -250,6 +414,18 @@ export async function exportStatisticsPdf(payload: PdfReportPayload): Promise<vo
     histogramBars,
     histogramFeedback,
     histogramReflection,
+    cumTitle = '',
+    cumVariableName = '',
+    cumUnit = '',
+    cumWidthType = 'equal',
+    cumRawValues = [],
+    cumIntervals = [],
+    cumTableInputs = {},
+    cumTableFeedback = [],
+    cumPoints = [],
+    cumCurveConnected = false,
+    cumCurveFeedback = [],
+    cumReflection = '',
   } = payload;
 
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -998,6 +1174,250 @@ export async function exportStatisticsPdf(payload: PdfReportPayload): Promise<vo
       }
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // 7 & 8. Cumulative Frequency Raw Data, Table & Ogive Curve (when present)
+  // ---------------------------------------------------------------------------
+  if (cumRawValues.length > 0 || cumPoints.length > 0) {
+    const safeCumUnit = sanitizePdfText(cumUnit);
+    const sortedCumRaw = [...cumRawValues].sort((a, b) => a - b);
+    const cumMin = sortedCumRaw.length > 0 ? sortedCumRaw[0] : 0;
+    const cumMax = sortedCumRaw.length > 0 ? sortedCumRaw[sortedCumRaw.length - 1] : 0;
+
+    y += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    const cumMetaText = sanitizePdfText(
+      `Title: ${cumTitle.trim() || cumVariableName.trim() || 'Cumulative Frequency Dataset'}  |  Class Width Type: ${
+        cumWidthType === 'unequal' ? 'Unequal' : 'Equal'
+      }  |  n = ${cumRawValues.length}${
+        sortedCumRaw.length > 0
+          ? `  |  Min = ${formatNum(cumMin)}${safeCumUnit ? ` ${safeCumUnit}` : ''}  |  Max = ${formatNum(cumMax)}${safeCumUnit ? ` ${safeCumUnit}` : ''}`
+          : ''
+      }`
+    );
+    const wrappedCumMeta = doc.splitTextToSize(cumMetaText, contentW) as string[];
+    const cumMetaLh = lineHeightMm(9, 1.3);
+
+    const cumRawLineText =
+      sortedCumRaw.length > 0
+        ? `Sorted Data: ${sortedCumRaw.map((v) => formatNum(v)).join(', ')}`
+        : 'Sorted Data: (No raw values entered)';
+    doc.setFontSize(8.3);
+    const wrappedCumRaw = doc.splitTextToSize(
+      sanitizePdfText(cumRawLineText),
+      contentW
+    ) as string[];
+
+    ensureSpace(14 + wrappedCumMeta.length * cumMetaLh);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text('7. Cumulative Frequency Raw Data & Grouped Table', margin, y);
+    y += 5.5;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(51, 65, 85);
+    y = drawLines(doc, wrappedCumMeta, margin, y, cumMetaLh);
+    y += 1.2;
+
+    doc.setFontSize(8.3);
+    doc.setTextColor(71, 85, 105);
+    wrappedCumRaw.forEach((line) => {
+      ensureSpace(rawLh + 1);
+      doc.text(line, margin, y);
+      y += rawLh;
+    });
+    y += 4;
+
+    // 3-Column Cumulative Frequency Table (total = 182mm)
+    const cumColWidths = [78, 48, 56];
+    const cumHeaders = ['Interval Group', 'Frequency (f)', 'Cumulative Frequency (cf)'];
+
+    const drawCumTableHeader = (continued = false) => {
+      if (continued) {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.5);
+        doc.setTextColor(71, 85, 105);
+        doc.text('7. Cumulative Frequency Table (continued)', margin, y);
+        y += 4.5;
+      }
+      const headerH = 8.5;
+      doc.setFillColor(241, 245, 249);
+      doc.setDrawColor(203, 213, 225);
+      doc.rect(margin, y, contentW, headerH, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.2);
+      doc.setTextColor(30, 41, 59);
+      let cx = margin;
+      cumHeaders.forEach((h, idx) => {
+        if (idx > 0) {
+          doc.setDrawColor(203, 213, 225);
+          doc.line(cx, y, cx, y + headerH);
+        }
+        doc.text(h, cx + cellPadX, y + 5.5);
+        cx += cumColWidths[idx];
+      });
+      y += headerH;
+    };
+
+    ensureSpace(16);
+    drawCumTableHeader(false);
+
+    if (cumIntervals.length === 0) {
+      doc.setDrawColor(226, 232, 240);
+      doc.rect(margin, y, contentW, 8.5, 'S');
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.2);
+      doc.setTextColor(100, 116, 139);
+      doc.text('No cumulative class intervals configured yet.', margin + cellPadX, y + 5.5);
+      y += 12;
+    } else {
+      cumIntervals.forEach((iv, idx) => {
+        const rowInput = cumTableInputs[iv.id];
+        const fb = cumTableFeedback[idx];
+        const isLast = idx === cumIntervals.length - 1;
+        const cmpOp = isLast ? '<=' : '<';
+        const expectedInterval = `${formatNum(iv.lower)} <= x ${cmpOp} ${formatNum(iv.upper)}`;
+        const hasInterval = Boolean(
+          rowInput?.lowerBound?.trim() || rowInput?.upperBound?.trim()
+        );
+        const studentInterval = `${rowInput?.lowerBound?.trim() || '?'} <= x ${cmpOp} ${
+          rowInput?.upperBound?.trim() || '?'
+        }`;
+
+        const rawCells = [
+          hasInterval
+            ? fb?.interval.status === 'correct'
+              ? `${studentInterval} [OK]`
+              : `${studentInterval} (Exp: ${expectedInterval})`
+            : `- (Exp: ${expectedInterval})`,
+          rowInput?.frequency?.trim()
+            ? fb?.frequency.status === 'correct'
+              ? `${rowInput.frequency.trim()} [OK]`
+              : `${rowInput.frequency.trim()} (${iv.trueFrequency})`
+            : `- (${iv.trueFrequency})`,
+          rowInput?.cumulativeFrequency?.trim()
+            ? fb?.cumulativeFrequency.status === 'correct'
+              ? `${rowInput.cumulativeFrequency.trim()} [OK]`
+              : `${rowInput.cumulativeFrequency.trim()} (${iv.trueCumulativeFrequency})`
+            : `- (${iv.trueCumulativeFrequency})`,
+        ];
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        const wrappedCells = rawCells.map((val, cIdx) =>
+          doc.splitTextToSize(sanitizePdfText(val), cumColWidths[cIdx] - cellPadX * 2) as string[]
+        );
+        const maxLines = Math.max(1, ...wrappedCells.map((lines) => lines.length));
+        const rowH = Math.max(7.6, maxLines * tableLh + 3.2);
+
+        ensureSpace(rowH, () => drawCumTableHeader(true));
+
+        if (idx % 2 === 1) {
+          doc.setFillColor(248, 250, 252);
+          doc.rect(margin, y, contentW, rowH, 'F');
+        }
+        doc.setDrawColor(226, 232, 240);
+        doc.rect(margin, y, contentW, rowH, 'S');
+
+        let cellX = margin;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(30, 41, 59);
+        wrappedCells.forEach((lines, cIdx) => {
+          if (cIdx > 0) {
+            doc.setDrawColor(226, 232, 240);
+            doc.line(cellX, y, cellX, y + rowH);
+          }
+          drawLines(doc, lines, cellX + cellPadX, y + 4.7, tableLh);
+          cellX += cumColWidths[cIdx];
+        });
+        y += rowH;
+      });
+      y += 7;
+    }
+
+    // Section 8: Cumulative Frequency Curve SVG -> PNG & Reflection
+    ensureSpace(8 + imgH + 6);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text('8. Cumulative Frequency Curve (Ogive)', margin, y);
+    y += 4.5;
+
+    const cumSvg = buildCumulativeCurveSvgString(
+      cumIntervals,
+      cumPoints,
+      cumCurveConnected,
+      cumCurveFeedback,
+      sanitizePdfText(cumVariableName || 'Upper Boundary'),
+      safeCumUnit
+    );
+    const cumPng = await svgToPngDataUrl(cumSvg);
+    doc.setDrawColor(226, 232, 240);
+    doc.rect(margin, y, imgW, imgH);
+    doc.addImage(cumPng, 'PNG', margin, y, imgW, imgH);
+    y += imgH + 6;
+
+    const accurateCumPts = cumCurveFeedback.filter(
+      (f) => f.status === 'accurate' || f.status === 'close'
+    ).length;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.8);
+    doc.setTextColor(51, 65, 85);
+    const cumStatusLine = sanitizePdfText(
+      `Plotted Points Verified: ${accurateCumPts} / ${cumCurveFeedback.length}  |  Curve Connected: ${
+        cumCurveConnected ? 'Yes [OK]' : 'Not yet connected'
+      }`
+    );
+    ensureSpace(14);
+    doc.text(cumStatusLine, margin, y);
+    y += 6;
+
+    // Cumulative Frequency Reflection Box
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    const cumRefTitleLines = doc.splitTextToSize(
+      'Cumulative Frequency Curve Interpretation (Median, Quartiles & Meaning)',
+      contentW - 8
+    ) as string[];
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    const cumRefBodyLines = doc.splitTextToSize(
+      sanitizePdfText(cumReflection.trim() || '(No response entered)'),
+      contentW - 8
+    ) as string[];
+    const cumRefBoxH = Math.max(
+      17,
+      5.5 +
+        cumRefTitleLines.length * refTitleLh +
+        1.5 +
+        cumRefBodyLines.length * refBodyLh +
+        3.5
+    );
+    if (cumRefBoxH <= bottomLimit - topMargin) {
+      ensureSpace(cumRefBoxH + 3.5);
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(margin, y, contentW, cumRefBoxH, 2, 2, 'FD');
+
+      let cry = y + 5.8;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(30, 58, 95);
+      cry = drawLines(doc, cumRefTitleLines, margin + 4, cry, refTitleLh);
+      cry += 1.2;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(51, 65, 85);
+      drawLines(doc, cumRefBodyLines, margin + 4, cry, refBodyLh);
+      y += cumRefBoxH + 4;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Page Footer on Every Page
