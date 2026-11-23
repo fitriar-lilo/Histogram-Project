@@ -157,6 +157,13 @@ export interface CumulativePointFeedback {
   guidance: string;
 }
 
+export interface StudentCumulativeAnalysis {
+  q1Thought: string;
+  q2Thought: string;
+  q3Thought: string;
+  iqrThought: string;
+}
+
 export interface GroupProjectState {
   groupName: string;
   members: GroupMember[];
@@ -187,6 +194,7 @@ export interface GroupProjectState {
   hasCheckedCumTable: boolean;
   cumPoints: CumulativePoint[];
   cumCurveConnected: boolean;
+  cumAnalysis: StudentCumulativeAnalysis;
   cumReflection: string;
   hasCheckedCumCurve: boolean;
 }
@@ -265,6 +273,11 @@ export interface GroupProjectPatch {
   cumPoints?: CumulativePoint[];
   cumCurveConnected?: boolean;
   cumCurveReset?: boolean;
+  cumAnalysisField?: {
+    field: keyof StudentCumulativeAnalysis;
+    value: string;
+  };
+  clearCumAnalysis?: boolean;
   cumReflection?: string;
   hasCheckedCumCurve?: boolean;
   clearAllCumData?: boolean;

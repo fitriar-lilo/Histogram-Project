@@ -8,6 +8,7 @@ import {
   CumulativeRowFeedback,
   HistogramBarFeedback,
   RowFeedback,
+  StudentCumulativeAnalysis,
   StudentCumulativeTableInputs,
   StudentHistogramBar,
   StudentHistogramReflection,
@@ -48,6 +49,7 @@ export interface PdfReportPayload {
   cumPoints?: CumulativePoint[];
   cumCurveConnected?: boolean;
   cumCurveFeedback?: CumulativePointFeedback[];
+  cumAnalysis?: StudentCumulativeAnalysis;
   cumReflection?: string;
 }
 
@@ -425,6 +427,12 @@ export async function exportStatisticsPdf(payload: PdfReportPayload): Promise<vo
     cumPoints = [],
     cumCurveConnected = false,
     cumCurveFeedback = [],
+    cumAnalysis = {
+      q1Thought: '',
+      q2Thought: '',
+      q3Thought: '',
+      iqrThought: '',
+    },
     cumReflection = '',
   } = payload;
 
@@ -1377,46 +1385,71 @@ export async function exportStatisticsPdf(payload: PdfReportPayload): Promise<vo
     doc.text(cumStatusLine, margin, y);
     y += 6;
 
-    // Cumulative Frequency Reflection Box
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    const cumRefTitleLines = doc.splitTextToSize(
-      'Cumulative Frequency Curve Interpretation (Median, Quartiles & Meaning)',
-      contentW - 8
-    ) as string[];
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8.5);
-    const cumRefBodyLines = doc.splitTextToSize(
-      sanitizePdfText(cumReflection.trim() || '(No response entered)'),
-      contentW - 8
-    ) as string[];
-    const cumRefBoxH = Math.max(
-      17,
-      5.5 +
-        cumRefTitleLines.length * refTitleLh +
-        1.5 +
-        cumRefBodyLines.length * refBodyLh +
-        3.5
-    );
-    if (cumRefBoxH <= bottomLimit - topMargin) {
-      ensureSpace(cumRefBoxH + 3.5);
-      doc.setFillColor(248, 250, 252);
-      doc.setDrawColor(226, 232, 240);
-      doc.roundedRect(margin, y, contentW, cumRefBoxH, 2, 2, 'FD');
+    // Cumulative Frequency Quartiles (Q1, Q2, Q3), IQR & General Interpretation Boxes
+    const cumAnalysisCards = [
+      {
+        title: '1. Quartile 1 (Q1 - Lower Quartile, 25% of n)',
+        text: cumAnalysis.q1Thought?.trim() || '(No response entered)',
+      },
+      {
+        title: '2. Quartile 2 (Q2 - Median, 50% of n)',
+        text: cumAnalysis.q2Thought?.trim() || '(No response entered)',
+      },
+      {
+        title: '3. Quartile 3 (Q3 - Upper Quartile, 75% of n)',
+        text: cumAnalysis.q3Thought?.trim() || '(No response entered)',
+      },
+      {
+        title: '4. Interquartile Range (IQR = Q3 - Q1)',
+        text: cumAnalysis.iqrThought?.trim() || '(No response entered)',
+      },
+      {
+        title: '5. General Meaning & Real-World Conclusion',
+        text: cumReflection.trim() || '(No response entered)',
+      },
+    ];
 
-      let cry = y + 5.8;
+    cumAnalysisCards.forEach((card) => {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(9);
-      doc.setTextColor(30, 58, 95);
-      cry = drawLines(doc, cumRefTitleLines, margin + 4, cry, refTitleLh);
-      cry += 1.2;
-
+      const cardTitleLines = doc.splitTextToSize(
+        sanitizePdfText(card.title),
+        contentW - 8
+      ) as string[];
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8.5);
-      doc.setTextColor(51, 65, 85);
-      drawLines(doc, cumRefBodyLines, margin + 4, cry, refBodyLh);
-      y += cumRefBoxH + 4;
-    }
+      const cardBodyLines = doc.splitTextToSize(
+        sanitizePdfText(card.text),
+        contentW - 8
+      ) as string[];
+      const cardBoxH = Math.max(
+        16,
+        5.5 +
+          cardTitleLines.length * refTitleLh +
+          1.5 +
+          cardBodyLines.length * refBodyLh +
+          3.5
+      );
+      if (cardBoxH <= bottomLimit - topMargin) {
+        ensureSpace(cardBoxH + 3.5);
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(margin, y, contentW, cardBoxH, 2, 2, 'FD');
+
+        let cry = y + 5.8;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(30, 58, 95);
+        cry = drawLines(doc, cardTitleLines, margin + 4, cry, refTitleLh);
+        cry += 1.2;
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(51, 65, 85);
+        drawLines(doc, cardBodyLines, margin + 4, cry, refBodyLh);
+        y += cardBoxH + 3.5;
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------

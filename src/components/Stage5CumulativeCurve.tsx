@@ -17,6 +17,7 @@ import {
   CumulativeInterval,
   CumulativePoint,
   CumulativePointFeedback,
+  StudentCumulativeAnalysis,
   StudentCumulativeTableInputs,
 } from '../types/statistics';
 import { buildSmoothOgivePath, formatNum, niceAxisMax, roundTo } from '../utils/mathStats';
@@ -32,11 +33,14 @@ interface Stage5CumulativeCurveProps {
   curveConnected: boolean;
   feedback: CumulativePointFeedback[];
   hasChecked: boolean;
+  analysis: StudentCumulativeAnalysis;
   reflection: string;
   onUpdatePoints: (points: CumulativePoint[]) => void;
   onToggleCurveConnected: (connected: boolean) => void;
   onResetCurve: () => void;
   onCheckCurve: () => void;
+  onUpdateAnalysis: (field: keyof StudentCumulativeAnalysis, value: string) => void;
+  onClearAnalysis: () => void;
   onUpdateReflection: (text: string) => void;
   onDownloadPdf: () => void;
   isExporting: boolean;
@@ -53,11 +57,14 @@ export function Stage5CumulativeCurve({
   curveConnected,
   feedback,
   hasChecked,
+  analysis,
   reflection,
   onUpdatePoints,
   onToggleCurveConnected,
   onResetCurve,
   onCheckCurve,
+  onUpdateAnalysis,
+  onClearAnalysis,
   onUpdateReflection,
   onDownloadPdf,
   isExporting,
@@ -880,34 +887,169 @@ export function Stage5CumulativeCurve({
           </div>
         </div>
 
-        {/* Cumulative Curve Interpretation & Median/Quartiles Notes */}
-        <div className="mt-6 pt-6 border-t border-slate-200 space-y-3">
-          <div className="flex items-start gap-2.5">
-            <div className="p-2 rounded-lg bg-[#EEF4FF] text-[#1D4ED8] shrink-0 mt-0.5">
-              <MessageSquareText className="w-4 h-4" aria-hidden="true" />
+        {/* Quartile 1, 2, 3, Interquartile Range & Interpretation Free Analysis Boxes */}
+        <div className="mt-6 pt-6 border-t border-slate-200 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <div className="p-2 rounded-lg bg-[#EEF4FF] text-[#1D4ED8] shrink-0 mt-0.5">
+                <MessageSquareText className="w-4 h-4" aria-hidden="true" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-[#1E3A5F]">
+                  Quartiles (Q1, Q2, Q3) &amp; Interquartile Range (IQR) Analysis
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Use your cumulative frequency curve for{' '}
+                  <span className="font-medium text-slate-700">
+                    {cumTitle?.trim() || cumVariableName || 'this dataset'}
+                  </span>{' '}
+                  to read Q1, Q2, Q3, calculate the Interquartile Range, and write your analysis below (included in PDF).
+                </p>
+              </div>
             </div>
-            <div>
-              <h3 className="text-sm font-semibold text-[#1E3A5F]">
-                Cumulative Frequency Curve Interpretation (Median, Quartiles &amp; Meaning)
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Record your observations from your cumulative frequency curve for{' '}
-                <span className="font-medium text-slate-700">
-                  {cumTitle?.trim() || cumVariableName || 'this dataset'}
-                </span>{' '}
-                (e.g., estimated median at cf = n/2, lower/upper quartiles, interquartile range, or real-world meaning).
-              </p>
-            </div>
+
+            <button
+              type="button"
+              onClick={onClearAnalysis}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0 self-start cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Clear Analysis</span>
+            </button>
           </div>
 
-          <textarea
-            id="cum-reflection-textarea"
-            rows={4}
-            value={reflection}
-            onChange={(e) => onUpdateReflection(e.target.value)}
-            placeholder="Write your interpretation of the cumulative frequency curve, estimated median, quartiles, and real-world meaning (included in PDF)..."
-            className="w-full px-3.5 py-2.5 text-xs bg-[#F8FAFF] border border-[#CBD9ED] rounded-lg text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-600 leading-relaxed"
-          />
+          {(() => {
+            const totalN =
+              cumIntervals.length > 0
+                ? cumIntervals[cumIntervals.length - 1].trueCumulativeFrequency
+                : 0;
+            const unitLabel = cumUnit ? ` (${cumUnit})` : '';
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* 1. Quartile 1 (Q1) */}
+                <div className="p-4 bg-[#F5F8FF] border border-[#D6E4FF] rounded-xl flex flex-col space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="cum-analysis-q1"
+                      className="text-xs font-semibold text-[#1E3A5F]"
+                    >
+                      1. Quartile 1 (Q1 — Lower Quartile)
+                    </label>
+                    <span className="text-[11px] font-mono-tabular font-medium text-[#1D4ED8]">
+                      cf = ¼n{totalN > 0 ? ` = ${formatNum(totalN * 0.25, 2)}` : ''}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">
+                    Read the value{unitLabel} on the horizontal axis at 25% of total cumulative frequency and explain what Q1 shows.
+                  </p>
+                  <textarea
+                    id="cum-analysis-q1"
+                    rows={3}
+                    value={analysis.q1Thought}
+                    onChange={(e) => onUpdateAnalysis('q1Thought', e.target.value)}
+                    placeholder={`Write your Q1 reading and analysis${unitLabel}...`}
+                    className="w-full flex-1 px-3 py-2 text-xs bg-white border border-[#CBD9ED] rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 leading-relaxed"
+                  />
+                </div>
+
+                {/* 2. Quartile 2 (Q2 - Median) */}
+                <div className="p-4 bg-[#F2FBF8] border border-[#CBEFE6] rounded-xl flex flex-col space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="cum-analysis-q2"
+                      className="text-xs font-semibold text-[#134E4A]"
+                    >
+                      2. Quartile 2 (Q2 — Median)
+                    </label>
+                    <span className="text-[11px] font-mono-tabular font-medium text-[#0F766E]">
+                      cf = ½n{totalN > 0 ? ` = ${formatNum(totalN * 0.5, 2)}` : ''}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">
+                    Read the median value{unitLabel} at 50% of total cumulative frequency and describe what this central value represents.
+                  </p>
+                  <textarea
+                    id="cum-analysis-q2"
+                    rows={3}
+                    value={analysis.q2Thought}
+                    onChange={(e) => onUpdateAnalysis('q2Thought', e.target.value)}
+                    placeholder={`Write your Q2 (median) reading and analysis${unitLabel}...`}
+                    className="w-full flex-1 px-3 py-2 text-xs bg-white border border-[#BFE6DC] rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600 leading-relaxed"
+                  />
+                </div>
+
+                {/* 3. Quartile 3 (Q3) */}
+                <div className="p-4 bg-[#F6F5FF] border border-[#DDD6FE] rounded-xl flex flex-col space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="cum-analysis-q3"
+                      className="text-xs font-semibold text-[#312E81]"
+                    >
+                      3. Quartile 3 (Q3 — Upper Quartile)
+                    </label>
+                    <span className="text-[11px] font-mono-tabular font-medium text-[#4338CA]">
+                      cf = ¾n{totalN > 0 ? ` = ${formatNum(totalN * 0.75, 2)}` : ''}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">
+                    Read the value{unitLabel} at 75% of total cumulative frequency and explain what Q3 tells you about the upper 25%.
+                  </p>
+                  <textarea
+                    id="cum-analysis-q3"
+                    rows={3}
+                    value={analysis.q3Thought}
+                    onChange={(e) => onUpdateAnalysis('q3Thought', e.target.value)}
+                    placeholder={`Write your Q3 reading and analysis${unitLabel}...`}
+                    className="w-full flex-1 px-3 py-2 text-xs bg-white border border-[#D4CCF7] rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 leading-relaxed"
+                  />
+                </div>
+
+                {/* 4. Interquartile Range (IQR) */}
+                <div className="p-4 bg-[#F0F9FF] border border-[#BAE6FD] rounded-xl flex flex-col space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="cum-analysis-iqr"
+                      className="text-xs font-semibold text-[#0C4A6E]"
+                    >
+                      4. Interquartile Range (IQR)
+                    </label>
+                    <span className="text-[11px] font-mono-tabular font-medium text-[#0284C7]">
+                      IQR = Q3 − Q1
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">
+                    Calculate Q3 − Q1{unitLabel} and explain what this middle 50% spread reveals about the consistency of the data.
+                  </p>
+                  <textarea
+                    id="cum-analysis-iqr"
+                    rows={3}
+                    value={analysis.iqrThought}
+                    onChange={(e) => onUpdateAnalysis('iqrThought', e.target.value)}
+                    placeholder={`Show IQR = Q3 − Q1 and explain the spread of the middle 50%${unitLabel}...`}
+                    className="w-full flex-1 px-3 py-2 text-xs bg-white border border-[#BAE6FD] rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-600 leading-relaxed"
+                  />
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* General Interpretation Box */}
+          <div className="p-4 bg-[#F8FAFC] border border-slate-200 rounded-xl space-y-2">
+            <label
+              htmlFor="cum-reflection-textarea"
+              className="block text-xs font-semibold text-[#1E3A5F]"
+            >
+              5. General Meaning &amp; Real-World Conclusion from the Cumulative Frequency Curve
+            </label>
+            <textarea
+              id="cum-reflection-textarea"
+              rows={3}
+              value={reflection}
+              onChange={(e) => onUpdateReflection(e.target.value)}
+              placeholder="Summarize any additional conclusions or real-world meaning from your cumulative frequency curve (included in PDF)..."
+              className="w-full px-3.5 py-2 text-xs bg-white border border-[#CBD9ED] rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 leading-relaxed"
+            />
+          </div>
         </div>
       </div>
     </div>

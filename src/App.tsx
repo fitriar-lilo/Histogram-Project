@@ -19,6 +19,7 @@ import type {
   GroupProjectState,
   GroupRoomState,
   LabStage,
+  StudentCumulativeAnalysis,
   StudentHistogramReflection,
   StudentIdentity,
   StudentSummaryCalculations,
@@ -243,6 +244,16 @@ export default function App() {
   );
   const cumPoints = useMemo(() => project.cumPoints ?? [], [project.cumPoints]);
   const cumCurveConnected = project.cumCurveConnected ?? false;
+  const cumAnalysis: StudentCumulativeAnalysis = useMemo(
+    () =>
+      project.cumAnalysis ?? {
+        q1Thought: '',
+        q2Thought: '',
+        q3Thought: '',
+        iqrThought: '',
+      },
+    [project.cumAnalysis]
+  );
 
   const cumRawValues = useMemo(
     () => parseNumberList(project.cumRawInputText ?? '').values,
@@ -361,6 +372,7 @@ export default function App() {
         cumPoints,
         cumCurveConnected,
         cumCurveFeedback,
+        cumAnalysis,
         cumReflection: project.cumReflection ?? '',
       });
     } catch (err) {
@@ -565,6 +577,7 @@ export default function App() {
             curveConnected={cumCurveConnected}
             feedback={cumCurveFeedback}
             hasChecked={project.hasCheckedCumCurve ?? false}
+            analysis={cumAnalysis}
             reflection={project.cumReflection ?? ''}
             onUpdatePoints={handleUpdateCumPoints}
             onToggleCurveConnected={(connected) =>
@@ -572,6 +585,10 @@ export default function App() {
             }
             onResetCurve={() => applyLocalPatch({ cumCurveReset: true })}
             onCheckCurve={() => applyLocalPatch({ hasCheckedCumCurve: true })}
+            onUpdateAnalysis={(field, value) =>
+              applyLocalPatch({ cumAnalysisField: { field, value } })
+            }
+            onClearAnalysis={() => applyLocalPatch({ clearCumAnalysis: true })}
             onUpdateReflection={(text) => applyLocalPatch({ cumReflection: text })}
             onDownloadPdf={handleDownloadPdf}
             isExporting={isExporting}

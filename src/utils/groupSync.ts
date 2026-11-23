@@ -49,6 +49,12 @@ export function createEmptyGroupProject(): GroupProjectState {
     hasCheckedCumTable: false,
     cumPoints: [],
     cumCurveConnected: false,
+    cumAnalysis: {
+      q1Thought: '',
+      q2Thought: '',
+      q3Thought: '',
+      iqrThought: '',
+    },
     cumReflection: '',
     hasCheckedCumCurve: false,
   };
@@ -236,6 +242,12 @@ export function applyProjectPatch(
       hasCheckedCumTable: false,
       cumPoints: [],
       cumCurveConnected: false,
+      cumAnalysis: {
+        q1Thought: '',
+        q2Thought: '',
+        q3Thought: '',
+        iqrThought: '',
+      },
       cumReflection: '',
       hasCheckedCumCurve: false,
     };
@@ -320,6 +332,36 @@ export function applyProjectPatch(
     };
   }
 
+  if (patch.clearCumAnalysis) {
+    next = {
+      ...next,
+      cumAnalysis: {
+        q1Thought: '',
+        q2Thought: '',
+        q3Thought: '',
+        iqrThought: '',
+      },
+      cumReflection: '',
+    };
+  }
+
+  if (patch.cumAnalysisField) {
+    const { field, value } = patch.cumAnalysisField;
+    const prevAnalysis = next.cumAnalysis ?? {
+      q1Thought: '',
+      q2Thought: '',
+      q3Thought: '',
+      iqrThought: '',
+    };
+    next = {
+      ...next,
+      cumAnalysis: {
+        ...prevAnalysis,
+        [field]: value,
+      },
+    };
+  }
+
   if (typeof patch.cumReflection === 'string') {
     next = {
       ...next,
@@ -364,10 +406,12 @@ export function describePatchSection(patch: GroupProjectPatch): string {
     patch.cumPoints ||
     patch.cumCurveConnected !== undefined ||
     patch.cumCurveReset ||
+    patch.cumAnalysisField ||
+    patch.clearCumAnalysis ||
     patch.cumReflection !== undefined ||
     patch.hasCheckedCumCurve !== undefined
   ) {
-    return 'Stage 05 · Cumulative Frequency Curve';
+    return 'Stage 05 · Cumulative Curve & Quartiles';
   }
   return 'Project Update';
 }
